@@ -79,7 +79,9 @@ cosmos/
 ├── crates/
 │   ├── apps/
 │   │   └── orion/          # Mail app UI (GPUI-based)
+│   ├── config/             # Shared configuration utilities
 │   └── mail/               # Mail business logic (no UI deps)
+├── docs/                   # Documentation
 └── cosmos-stubs/           # Temporary stubs for cosmos-* crates
 ```
 
@@ -98,21 +100,41 @@ cosmos/
   - Delegates all decisions to mail crate
   - Contains: views, components, rendering, user input handling
 
+### Config Crate
+
+The `config` crate provides shared configuration utilities for all Cosmos apps:
+
+```rust
+use config::{config_path, load_json, save_json, init};
+
+// Bootstrap config directory on app startup
+config::init()?;
+
+// Load/save JSON config files from ~/.config/cosmos/
+let settings: MySettings = config::load_json("settings.json")?;
+config::save_json("settings.json", &settings)?;
+```
+
+Config directory: `~/.config/cosmos/`
+
 ### Mail Crate
 
 The `mail` crate provides platform-independent mail functionality:
 
 ```rust
 // Example usage in orion UI code
-use mail::{sync_inbox, list_threads, MailStore, GmailClient};
+use mail::{sync_inbox, list_threads, MailStore, GmailClient, GmailCredentials};
 ```
 
 **Key modules:**
 - `models/` - Domain types (Thread, Message, EmailAddress)
-- `gmail/` - Gmail API client and OAuth
+- `gmail/` - Gmail API client and OAuth (uses `ureq` for sync HTTP)
 - `storage/` - Storage trait abstractions
 - `sync/` - Idempotent sync engine
 - `query/` - Query API for UI consumption
+- `config` - Gmail credential loading
+
+**Important: The mail crate is fully synchronous.** It uses `ureq` (sync HTTP) and `std::fs` (sync file I/O) to be executor-agnostic. See `docs/async.md` for details.
 
 ### Orion Application
 
@@ -177,3 +199,65 @@ When working on this codebase:
 - Use trait abstractions for side effects (storage, network, etc.)
 - Ensure `mail` crate remains testable without UI
 - Follow idempotent sync patterns (operations safe to retry)
+- New dependencies should be added via cargo add and should use the latest versions available.
+
+## GPUI Async Runtime (CRITICAL)
+
+**GPUI does NOT use Tokio.** It has its own async executor based on platform-native dispatch (GCD on macOS). Any code using `tokio::*` will panic at runtime.
+
+**Forbidden in business logic crates:**
+- `tokio` (any module)
+- `reqwest` with default features (uses tokio internally via hyper)
+- `async-std`
+
+**Allowed alternatives:**
+- `ureq` - Sync HTTP client
+- `std::fs` - Sync file I/O
+- `std::thread::sleep` - Sync delays
+- `futures-timer` - If async sleep is needed
+
+**Pattern for running blocking code from GPUI:**
+
+```rust
+// In orion UI code
+let background = cx.background_executor().clone();
+cx.spawn(async move |this, cx| {
+    // Run blocking work on background thread pool
+    let result = background.spawn(async move {
+        sync_function()  // Sync call runs on background thread
+    }).await;
+
+    // Update UI on main thread
+    cx.update(|cx| {
+        this.update(cx, |app, cx| {
+            app.data = result;
+            cx.notify();
+        })
+    })
+}).detach();
+```
+
+See `docs/async.md` for full documentation.
+
+## Gmail Setup
+
+To use Gmail integration:
+
+1. **Get OAuth credentials:**
+   - Go to https://console.cloud.google.com
+   - Create/select a project
+   - Enable the Gmail API
+   - Create OAuth client ID (Desktop app type)
+   - Download the JSON file
+
+2. **Install credentials:**
+   ```bash
+   mkdir -p ~/.config/cosmos
+   cp ~/Downloads/client_secret_*.json ~/.config/cosmos/google-credentials.json
+   ```
+
+3. **Run and authenticate:**
+   - Run `cargo run -p orion`
+   - Click "Sync" button
+   - Follow device flow prompts in terminal
+   - Token saved to `~/.config/cosmos/gmail-tokens.json`

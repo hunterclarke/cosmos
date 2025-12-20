@@ -1,47 +1,67 @@
-use gpui::{Application, Render, Window, WindowOptions};
+//! Orion - A read-only Gmail inbox viewer
+//!
+//! This is the main entry point for the Orion mail application.
 
-struct App {}
+use gpui::prelude::*;
+use gpui::{px, size, Application, WindowOptions};
+use mail::GmailCredentials;
 
-impl Render for App {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .bg(rgb(0x505050))
-            .size(px(500.0))
-            .justify_center()
-            .items_center()
-            .shadow_lg()
-            .border_1()
-            .border_color(rgb(0x0000ff))
-            .text_xl()
-            .text_color(rgb(0xffffff))
-            .child(format!("Hello, {}!", &self.text))
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(div().size_8().bg(gpui::red()))
-                    .child(div().size_8().bg(gpui::green()))
-                    .child(div().size_8().bg(gpui::blue()))
-                    .child(div().size_8().bg(gpui::yellow()))
-                    .child(div().size_8().bg(gpui::black()))
-                    .child(div().size_8().bg(gpui::white())),
-            )
-    }
-}
+mod app;
+mod components;
+mod views;
+
+use app::OrionApp;
 
 fn main() {
-    println!("Hello world!");
-    Application::new().run(|cx: &mut App| {
-        cx.open_window(
-            WindowOptions {
-                ..Default::default()
-            }, 
-            |_, cx| {
-                cx.new(|_| App {})
-            },
-        ).unwrap();
+    // Bootstrap config directory
+    if let Err(e) = config::init() {
+        eprintln!("Failed to initialize config directory: {}", e);
+    }
+
+    Application::new().run(|cx| {
+        let window_options = WindowOptions {
+            window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
+                origin: gpui::Point::default(),
+                size: size(px(1200.), px(800.)),
+            })),
+            ..Default::default()
+        };
+
+        cx.open_window(window_options, |_window, cx| {
+            cx.new(|cx| {
+                let mut app = OrionApp::new(cx);
+
+                // Load Gmail credentials from config file or environment
+                match GmailCredentials::load() {
+                    Ok(creds) => {
+                        if let Err(e) = app.init_gmail(creds.client_id, creds.client_secret) {
+                            eprintln!("Failed to initialize Gmail client: {}", e);
+                        } else {
+                            println!("Gmail client initialized successfully");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Gmail credentials not found: {}", e);
+                        if let Some(path) = GmailCredentials::default_credentials_path() {
+                            eprintln!(
+                                "\nTo configure Gmail access, either:\n\
+                                 1. Place your Google OAuth credentials at:\n   {}\n\
+                                 2. Or set environment variables:\n   \
+                                    GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+
+                // Load initial threads
+                if let Some(inbox) = &app.inbox_view {
+                    inbox.update(cx, |view, cx| view.load_threads(cx));
+                }
+
+                app
+            })
+        })
+        .expect("Failed to open window");
     });
 }

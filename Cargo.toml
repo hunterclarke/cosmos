@@ -1,3 +1,6 @@
 [workspace]
-members = ["crates/apps/orion"]
+members = [
+    "crates/apps/orion", "crates/config",
+    "crates/mail",
+]
 resolver = "3"
