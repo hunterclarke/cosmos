@@ -162,19 +162,69 @@ Orion is a mail application built with GPUI (v0.2.2), a GPU-accelerated UI frame
 
 **Using gpui-component:**
 
-The `gpui-component` crate provides reusable UI components and utilities for GPUI applications. To use components from this crate:
+The `gpui-component` crate provides reusable UI components, theming, and utilities for GPUI applications.
 
+**Theme System:**
 ```rust
-use gpui_component::prelude::*;
-// or import specific components:
-use gpui_component::{Button, Input, Modal, etc.};
+use gpui_component::ActiveTheme;
+
+// In render methods, access theme colors via cx.theme()
+fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let theme = cx.theme();
+
+    div()
+        .bg(theme.background)
+        .text_color(theme.foreground)
+        .border_color(theme.border)
+        // ...
+}
 ```
 
-Common patterns with gpui-component:
-- Import from `gpui_component::prelude::*` for commonly used component traits and utilities
-- Components follow the same `Render` trait pattern as core GPUI
-- Components can be composed together using the same `.child()` method chaining
-- Use gpui-component for higher-level UI patterns (buttons, inputs, modals, etc.) while core GPUI provides primitives (div, text, etc.)
+Available theme colors include:
+- `background`, `foreground` - Base colors
+- `muted_foreground` - Subdued text
+- `border` - Border/divider color
+- `primary`, `primary_foreground`, `primary_hover`, `primary_active` - Primary accent
+- `secondary`, `secondary_foreground` - Secondary background/text
+- `danger`, `danger_foreground` - Error states
+- `list`, `list_active`, `list_hover`, `list_active_border` - List item states
+
+**Components:**
+```rust
+use gpui_component::button::{Button, ButtonVariants};
+
+// Button with variants
+Button::new("my-button")
+    .label("Click me")
+    .primary()  // or .ghost(), .secondary(), .danger()
+    .on_click(cx.listener(|this, _event, _window, cx| { ... }))
+```
+
+**Custom Components with RenderOnce:**
+```rust
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::ActiveTheme;
+
+#[derive(IntoElement)]  // Required for RenderOnce to work with .child()
+pub struct MyComponent { ... }
+
+impl RenderOnce for MyComponent {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        div().bg(theme.list).text_color(theme.foreground).child("...")
+    }
+}
+```
+
+**Dark Theme Setup:**
+```rust
+// In main.rs or app initialization
+use gpui_component::{Theme, ThemeMode};
+
+gpui_component::init(cx);
+Theme::change(ThemeMode::Dark, None, cx);
+```
 
 ## Cosmos Integration
 

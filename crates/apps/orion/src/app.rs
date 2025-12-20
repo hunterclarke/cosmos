@@ -2,17 +2,18 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use mail::{GmailAuth, GmailClient, ThreadId, storage::InMemoryMailStore, sync_inbox};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::ActiveTheme;
+use mail::{storage::InMemoryMailStore, sync_inbox, GmailAuth, GmailClient, ThreadId};
 use std::sync::Arc;
 
 use crate::views::{InboxView, ThreadView};
 
 /// Current view in the application
 #[derive(Clone)]
-#[allow(dead_code)]
 pub enum View {
     Inbox,
-    Thread(ThreadId),
+    Thread,
 }
 
 /// Root application state
@@ -29,6 +30,7 @@ pub struct OrionApp {
 impl OrionApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let store = Arc::new(InMemoryMailStore::new());
+        // Create inbox view - we'll set the app handle after construction
         let inbox_view = cx.new(|_| InboxView::new(store.clone()));
 
         Self {
@@ -42,6 +44,13 @@ impl OrionApp {
         }
     }
 
+    /// Wire up navigation by setting app handle on child views
+    pub fn wire_navigation(&mut self, app_handle: Entity<Self>, cx: &mut Context<Self>) {
+        if let Some(inbox) = &self.inbox_view {
+            inbox.update(cx, |view, _| view.set_app(app_handle.clone()));
+        }
+    }
+
     /// Initialize Gmail client with credentials
     pub fn init_gmail(&mut self, client_id: String, client_secret: String) -> anyhow::Result<()> {
         let auth = GmailAuth::new(client_id, client_secret)?;
@@ -51,7 +60,6 @@ impl OrionApp {
     }
 
     /// Navigate to inbox view
-    #[allow(dead_code)]
     pub fn show_inbox(&mut self, cx: &mut Context<Self>) {
         if self.inbox_view.is_none() {
             self.inbox_view = Some(cx.new(|_| InboxView::new(self.store.clone())));
@@ -62,14 +70,15 @@ impl OrionApp {
     }
 
     /// Navigate to thread view
-    #[allow(dead_code)]
     pub fn show_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        let app_handle = cx.entity().clone();
         self.thread_view = Some(cx.new(|cx| {
             let mut view = ThreadView::new(self.store.clone(), thread_id.clone());
+            view.set_app(app_handle);
             view.load_thread(cx);
             view
         }));
-        self.current_view = View::Thread(thread_id);
+        self.current_view = View::Thread;
         cx.notify();
     }
 
@@ -129,14 +138,16 @@ impl OrionApp {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_syncing = self.is_syncing;
+        let theme = cx.theme();
 
         div()
             .w_full()
             .px_4()
-            .py_2()
-            .bg(rgb(0x0a0a1a))
+            .pt_8() // Extra top padding for window controls
+            .pb_2()
+            .bg(theme.background)
             .border_b_1()
-            .border_color(rgb(0x303040))
+            .border_color(theme.border)
             .flex()
             .justify_between()
             .items_center()
@@ -149,10 +160,15 @@ impl OrionApp {
                         div()
                             .text_xl()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x6a8aff))
+                            .text_color(theme.primary)
                             .child("Orion"),
                     )
-                    .child(div().text_xs().text_color(rgb(0x666677)).child("Mail")),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Mail"),
+                    ),
             )
             .child(
                 div()
@@ -163,69 +179,62 @@ impl OrionApp {
                         el.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0xff6666))
+                                .text_color(theme.danger)
                                 .max_w(px(300.))
                                 .text_ellipsis()
                                 .child(err),
                         )
                     })
                     .child(
-                        div()
-                            .id("sync-button")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(rgb(0x2a3a5a))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(0x3a4a6a)))
-                            .when(is_syncing, |el| el.opacity(0.5))
+                        Button::new("sync-button")
+                            .label(if is_syncing { "Syncing..." } else { "Sync" })
+                            .primary()
+                            .loading(is_syncing)
                             .on_click(cx.listener(|app, _event, _window, cx| {
                                 app.sync(cx);
-                            }))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xccccff))
-                                    .child(if is_syncing { "Syncing..." } else { "Sync" }),
-                            ),
+                            })),
                     ),
             )
     }
 
-    fn render_content(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         match &self.current_view {
             View::Inbox => {
                 if let Some(inbox) = &self.inbox_view {
                     inbox.clone().into_any_element()
                 } else {
-                    div().child("Loading...").into_any_element()
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Loading...")
+                        .into_any_element()
                 }
             }
-            View::Thread(_) => {
+            View::Thread => {
                 if let Some(thread) = &self.thread_view {
                     thread.clone().into_any_element()
                 } else {
-                    div().child("Loading thread...").into_any_element()
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Loading thread...")
+                        .into_any_element()
                 }
             }
         }
-    }
-
-    /// Handle thread selection from inbox
-    #[allow(dead_code)]
-    pub fn on_thread_selected(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
-        self.show_thread(thread_id, cx);
     }
 }
 
 impl Render for OrionApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x0a0a1a))
-            .text_color(rgb(0xffffff))
+            .bg(theme.background)
+            .text_color(theme.foreground)
             .child(self.render_header(cx))
             .child(
                 div()

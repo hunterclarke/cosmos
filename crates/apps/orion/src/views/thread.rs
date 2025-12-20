@@ -2,23 +2,25 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use mail::{Message, ThreadDetail, ThreadId, get_thread_detail, storage::InMemoryMailStore};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::ActiveTheme;
+use mail::{get_thread_detail, storage::InMemoryMailStore, Message, ThreadDetail, ThreadId};
 use std::sync::Arc;
 
+use crate::app::OrionApp;
 use crate::components::MessageCard;
 
 /// Thread view showing messages in a conversation
-#[allow(dead_code)]
 pub struct ThreadView {
     store: Arc<InMemoryMailStore>,
     thread_id: ThreadId,
     detail: Option<ThreadDetail>,
     is_loading: bool,
     error_message: Option<String>,
+    app: Option<Entity<OrionApp>>,
 }
 
 impl ThreadView {
-    #[allow(dead_code)]
     pub fn new(store: Arc<InMemoryMailStore>, thread_id: ThreadId) -> Self {
         Self {
             store,
@@ -26,10 +28,23 @@ impl ThreadView {
             detail: None,
             is_loading: false,
             error_message: None,
+            app: None,
         }
     }
 
-    #[allow(dead_code)]
+    /// Set the parent app entity for navigation
+    pub fn set_app(&mut self, app: Entity<OrionApp>) {
+        self.app = Some(app);
+    }
+
+    fn go_back(&self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.show_inbox(cx);
+            });
+        }
+    }
+
     pub fn load_thread(&mut self, _cx: &mut Context<Self>) {
         self.is_loading = true;
         self.error_message = None;
@@ -51,6 +66,7 @@ impl ThreadView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let subject = self
             .detail
             .as_ref()
@@ -63,25 +79,19 @@ impl ThreadView {
             .w_full()
             .px_4()
             .py_3()
-            .bg(rgb(0x1a1a2a))
+            .bg(theme.background)
             .border_b_1()
-            .border_color(rgb(0x404050))
+            .border_color(theme.border)
             .flex()
             .items_center()
             .gap_4()
             .child(
-                div()
-                    .id("back-button")
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(0x2a2a3a))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x3a3a4a)))
-                    .on_click(cx.listener(|_view, _event, _window, _cx| {
-                        // Navigation handled by parent
-                    }))
-                    .child(div().text_sm().text_color(rgb(0xccccdd)).child("← Back")),
+                Button::new("back-button")
+                    .label("← Back")
+                    .ghost()
+                    .on_click(cx.listener(|view, _event, _window, cx| {
+                        view.go_back(cx);
+                    })),
             )
             .child(
                 div()
@@ -93,29 +103,33 @@ impl ThreadView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xffffff))
+                            .text_color(theme.foreground)
                             .text_ellipsis()
                             .child(subject),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(0x888899))
+                            .text_color(theme.muted_foreground)
                             .child(format!("{} messages", message_count)),
                     ),
             )
     }
 
-    fn render_loading(&self) -> impl IntoElement {
+    fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         div().flex().flex_1().justify_center().items_center().child(
             div()
                 .text_sm()
-                .text_color(rgb(0x888899))
+                .text_color(theme.muted_foreground)
                 .child("Loading thread..."),
         )
     }
 
-    fn render_error(&self, message: &str) -> impl IntoElement {
+    fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         div()
             .flex()
             .flex_1()
@@ -125,48 +139,53 @@ impl ThreadView {
             .child(
                 div()
                     .p_4()
-                    .bg(rgb(0x4a2a2a))
+                    .bg(theme.danger)
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(0x6a3a3a))
+                    .border_color(theme.danger)
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xffaaaa))
+                            .text_color(theme.danger_foreground)
                             .child(message.to_string()),
                     ),
             )
     }
 
-    fn render_messages(&self, messages: &[Message]) -> impl IntoElement {
+    fn render_messages(&self, messages: &[Message], cx: &mut Context<Self>) -> impl IntoElement {
         let messages = messages.to_vec();
+        let theme = cx.theme();
 
         div()
             .flex()
             .flex_col()
             .flex_1()
             .p_4()
+            .gap_3()
             .overflow_hidden()
+            .bg(theme.background)
             .children(messages.into_iter().map(MessageCard::new))
     }
 }
 
 impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1a1a2a))
+            .bg(theme.background)
             .child(self.render_header(cx))
             .child(if self.is_loading {
-                self.render_loading().into_any_element()
-            } else if let Some(ref error) = self.error_message {
-                self.render_error(error).into_any_element()
-            } else if let Some(ref detail) = self.detail {
-                self.render_messages(&detail.messages).into_any_element()
+                self.render_loading(cx).into_any_element()
+            } else if let Some(ref error) = self.error_message.clone() {
+                self.render_error(&error, cx).into_any_element()
+            } else if let Some(ref detail) = self.detail.clone() {
+                self.render_messages(&detail.messages, cx).into_any_element()
             } else {
-                self.render_loading().into_any_element()
+                self.render_loading(cx).into_any_element()
             })
     }
 }

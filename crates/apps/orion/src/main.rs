@@ -4,6 +4,7 @@
 
 use gpui::prelude::*;
 use gpui::{px, size, Application, WindowOptions};
+use gpui_component::{Theme, ThemeMode, TitleBar};
 use mail::GmailCredentials;
 
 mod app;
@@ -19,11 +20,16 @@ fn main() {
     }
 
     Application::new().run(|cx| {
+        // Initialize gpui-component and set dark mode
+        gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
+
         let window_options = WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
                 origin: gpui::Point::default(),
                 size: size(px(1200.), px(800.)),
             })),
+            titlebar: Some(TitleBar::title_bar_options()),
             ..Default::default()
         };
 
@@ -54,6 +60,10 @@ fn main() {
                     }
                 }
 
+                // Wire up navigation by passing app entity to child views
+                let app_handle = cx.entity().clone();
+                app.wire_navigation(app_handle, cx);
+
                 // Load initial threads
                 if let Some(inbox) = &app.inbox_view {
                     inbox.update(cx, |view, cx| view.load_threads(cx));
@@ -63,5 +73,7 @@ fn main() {
             })
         })
         .expect("Failed to open window");
+
+        println!("App started successfully");
     });
 }

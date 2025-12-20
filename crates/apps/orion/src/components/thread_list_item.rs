@@ -2,9 +2,11 @@
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::ActiveTheme;
 use mail::ThreadSummary;
 
 /// Props for ThreadListItem
+#[derive(IntoElement)]
 pub struct ThreadListItem {
     thread: ThreadSummary,
     is_selected: bool,
@@ -36,14 +38,20 @@ impl ThreadListItem {
     }
 }
 
-impl IntoElement for ThreadListItem {
-    type Element = AnyElement;
+impl RenderOnce for ThreadListItem {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
 
-    fn into_element(self) -> Self::Element {
         let bg_color = if self.is_selected {
-            rgb(0x3a3a5a)
+            theme.list_active
         } else {
-            rgb(0x2a2a3a)
+            theme.list
+        };
+
+        let border_color = if self.is_selected {
+            theme.list_active_border
+        } else {
+            theme.border
         };
 
         let date_str = self.format_date();
@@ -57,9 +65,9 @@ impl IntoElement for ThreadListItem {
             .py_3()
             .bg(bg_color)
             .border_b_1()
-            .border_color(rgb(0x404050))
+            .border_color(border_color)
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(0x3a3a4a)))
+            .hover(|style| style.bg(theme.list_hover))
             .child(
                 div()
                     .flex()
@@ -72,18 +80,19 @@ impl IntoElement for ThreadListItem {
                             .flex_col()
                             .gap_1()
                             .overflow_hidden()
+                            .flex_1()
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(theme.foreground)
                                     .text_ellipsis()
                                     .child(subject),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(0x888899))
+                                    .text_color(theme.muted_foreground)
                                     .text_ellipsis()
                                     .child(snippet),
                             ),
@@ -97,21 +106,25 @@ impl IntoElement for ThreadListItem {
                             .gap_1()
                             .flex_shrink_0()
                             .ml_4()
-                            .child(div().text_xs().text_color(rgb(0x888899)).child(date_str))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(date_str),
+                            )
                             .when(message_count > 1, |el| {
                                 el.child(
                                     div()
                                         .px_2()
                                         .py_px()
-                                        .bg(rgb(0x4a4a6a))
+                                        .bg(theme.primary)
                                         .rounded_md()
                                         .text_xs()
-                                        .text_color(rgb(0xccccdd))
+                                        .text_color(theme.primary_foreground)
                                         .child(format!("{}", message_count)),
                                 )
                             }),
                     ),
             )
-            .into_any_element()
     }
 }

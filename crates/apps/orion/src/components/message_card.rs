@@ -2,9 +2,11 @@
 
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::ActiveTheme;
 use mail::Message;
 
 /// Props for MessageCard
+#[derive(IntoElement)]
 pub struct MessageCard {
     message: Message,
 }
@@ -29,10 +31,9 @@ impl MessageCard {
     }
 }
 
-impl IntoElement for MessageCard {
-    type Element = AnyElement;
-
-    fn into_element(self) -> Self::Element {
+impl RenderOnce for MessageCard {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
         let date_str = self.format_date();
         let sender = self.sender_display();
         let from_email = self.message.from.email.clone();
@@ -44,11 +45,10 @@ impl IntoElement for MessageCard {
         div()
             .w_full()
             .p_4()
-            .mb_3()
-            .bg(rgb(0x2a2a3a))
+            .bg(theme.secondary)
             .rounded_lg()
             .border_1()
-            .border_color(rgb(0x404050))
+            .border_color(theme.border)
             .child(
                 div()
                     .flex()
@@ -69,35 +69,46 @@ impl IntoElement for MessageCard {
                                         div()
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(0xffffff))
+                                            .text_color(theme.foreground)
                                             .child(sender),
                                     )
                                     .child(
-                                        div().text_xs().text_color(rgb(0x888899)).child(from_email),
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(from_email),
                                     ),
                             )
-                            .child(div().text_xs().text_color(rgb(0x888899)).child(date_str)),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(date_str),
+                            ),
                     )
                     // Recipients
                     .when(has_recipients, |el| {
                         el.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x666677))
+                                .text_color(theme.muted_foreground)
                                 .child(format!("To: {}", recipients)),
                         )
                     })
                     // Body preview
                     .child(
-                        div().pt_2().border_t_1().border_color(rgb(0x404050)).child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xccccdd))
-                                .line_height(px(22.))
-                                .child(body),
-                        ),
+                        div()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.secondary_foreground)
+                                    .line_height(px(22.))
+                                    .child(body),
+                            ),
                     ),
             )
-            .into_any_element()
     }
 }
