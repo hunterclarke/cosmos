@@ -1,0 +1,8 @@
+[package]
+name = "orion"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "orion"
+path = "src/main.rs"
