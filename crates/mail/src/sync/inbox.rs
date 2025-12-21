@@ -184,11 +184,11 @@ fn initial_sync(
                             let is_new_thread = !store.has_thread(&thread_id)?;
 
                             // Store message immediately
-                            store.upsert_message(message.clone())?;
+                            store.upsert_message(message)?;
                             stats.messages_created += 1;
 
-                            // Update thread immediately
-                            let thread = compute_thread(&thread_id, &[message], store)?;
+                            // Update thread (message is already in store, pass empty slice)
+                            let thread = compute_thread(&thread_id, &[], store)?;
                             store.upsert_thread(thread)?;
 
                             // Track thread stats (only count once per batch)
@@ -332,11 +332,11 @@ fn incremental_sync(
                     let is_new_thread = !store.has_thread(&thread_id)?;
 
                     // Store message immediately
-                    store.upsert_message(message.clone())?;
+                    store.upsert_message(message)?;
                     stats.messages_created += 1;
 
-                    // Update thread immediately
-                    let thread = compute_thread(&thread_id, &[message], store)?;
+                    // Update thread (message is already in store, pass empty slice)
+                    let thread = compute_thread(&thread_id, &[], store)?;
                     store.upsert_thread(thread)?;
 
                     // Track thread stats (only count once)

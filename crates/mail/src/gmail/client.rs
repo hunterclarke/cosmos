@@ -4,6 +4,9 @@
 //! Uses synchronous HTTP (ureq) to be executor-agnostic.
 
 use anyhow::{Context, Result};
+use log::info;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::api::{GmailMessage, HistoryResponse, ListLabelsResponse, ListMessagesResponse};
@@ -154,23 +157,82 @@ impl GmailClient {
         Ok(message)
     }
 
-    /// Get multiple messages with retry logic
+    /// Get multiple messages in parallel with retry logic
+    ///
+    /// Uses rayon for parallel fetching to significantly speed up bulk downloads.
+    /// Progress callback receives (completed_count, total_count).
     ///
     /// # Arguments
     /// * `ids` - The message IDs to fetch
     pub fn get_messages_batch(&self, ids: &[MessageId]) -> Vec<Result<GmailMessage>> {
-        ids.iter()
-            .map(|id| self.get_message_with_retry(id, 3))
-            .collect()
+        self.get_messages_batch_parallel(ids, |_, _| {})
     }
 
-    /// Get a message with exponential backoff retry
-    fn get_message_with_retry(&self, id: &MessageId, max_retries: u32) -> Result<GmailMessage> {
+    /// Get multiple messages in parallel with progress reporting
+    ///
+    /// # Arguments
+    /// * `ids` - The message IDs to fetch
+    /// * `progress` - Callback called with (completed, total) after each message
+    pub fn get_messages_batch_parallel<F>(
+        &self,
+        ids: &[MessageId],
+        progress: F,
+    ) -> Vec<Result<GmailMessage>>
+    where
+        F: Fn(usize, usize) + Sync,
+    {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        // Pre-fetch access token to avoid contention during parallel fetches
+        let access_token = match self.auth.get_access_token() {
+            Ok(token) => token,
+            Err(e) => {
+                // Return error for all messages if we can't get a token
+                let err_msg = format!("Failed to get access token: {}", e);
+                return ids
+                    .iter()
+                    .map(|_| Err(anyhow::anyhow!("{}", err_msg)))
+                    .collect();
+            }
+        };
+
+        let total = ids.len();
+        let completed = AtomicUsize::new(0);
+        let num_threads = rayon::current_num_threads();
+        info!(
+            "Fetching {} messages in parallel ({} threads)",
+            total, num_threads
+        );
+
+        // Fetch messages in parallel using rayon
+        let results: Vec<_> = ids
+            .par_iter()
+            .map(|id| {
+                let result = self.get_message_with_token_retry(id, &access_token, 3);
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                progress(done, total);
+                result
+            })
+            .collect();
+
+        info!("Parallel fetch complete: {} messages", total);
+        results
+    }
+
+    /// Get a message using a pre-fetched access token with retry
+    fn get_message_with_token_retry(
+        &self,
+        id: &MessageId,
+        access_token: &str,
+        max_retries: u32,
+    ) -> Result<GmailMessage> {
         let mut last_error = None;
         let mut delay = Duration::from_millis(100);
 
         for attempt in 0..max_retries {
-            match self.get_message(id) {
+            match self.get_message_with_token(id, access_token) {
                 Ok(msg) => return Ok(msg),
                 Err(e) => {
                     last_error = Some(e);
@@ -185,6 +247,27 @@ impl GmailClient {
         }
 
         Err(last_error.unwrap())
+    }
+
+    /// Get a message using a pre-fetched access token
+    fn get_message_with_token(&self, id: &MessageId, access_token: &str) -> Result<GmailMessage> {
+        let url = format!(
+            "{}/users/me/messages/{}?format=full",
+            Self::BASE_URL,
+            id.as_str()
+        );
+
+        let mut response = ureq::get(&url)
+            .header("Authorization", &format!("Bearer {}", access_token))
+            .call()
+            .context("Failed to send get message request")?;
+
+        let message: GmailMessage = response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse message response")?;
+
+        Ok(message)
     }
 
     /// Check if the client is authenticated
