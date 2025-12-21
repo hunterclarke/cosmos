@@ -5,7 +5,9 @@
 //! storage implementations.
 
 mod memory;
+mod persistent;
 mod traits;
 
 pub use memory::InMemoryMailStore;
+pub use persistent::RedbMailStore;
 pub use traits::MailStore;

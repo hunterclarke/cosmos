@@ -5,4 +5,4 @@
 
 mod threads;
 
-pub use threads::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads};
+pub use threads::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads, list_threads_by_label};

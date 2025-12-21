@@ -18,8 +18,8 @@ pub mod storage;
 pub mod sync;
 
 pub use config::GmailCredentials;
-pub use gmail::{GmailAuth, GmailClient};
-pub use models::{EmailAddress, Message, MessageId, Thread, ThreadId};
-pub use query::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads};
-pub use storage::MailStore;
-pub use sync::sync_inbox;
+pub use gmail::{GmailAuth, GmailClient, HistoryExpiredError};
+pub use models::{label_icon, label_sort_order, EmailAddress, Label, LabelId, Message, MessageId, SyncState, Thread, ThreadId};
+pub use query::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads, list_threads_by_label};
+pub use storage::{InMemoryMailStore, MailStore, RedbMailStore};
+pub use sync::{SyncOptions, SyncStats, sync_gmail, sync_inbox};

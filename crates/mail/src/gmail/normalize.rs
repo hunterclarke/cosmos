@@ -48,6 +48,9 @@ pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
         extract_plain_text_body(payload).unwrap_or_default()
     };
 
+    // Extract label IDs
+    let label_ids = gmail_msg.label_ids.unwrap_or_default();
+
     Ok(Message::builder(id, thread_id)
         .from(from)
         .to(to)
@@ -56,6 +59,7 @@ pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
         .body_preview(body_preview)
         .received_at(received_at)
         .internal_date(internal_date)
+        .label_ids(label_ids)
         .build())
 }
 

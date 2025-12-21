@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::ActiveTheme;
-use mail::{get_thread_detail, storage::InMemoryMailStore, Message, ThreadDetail, ThreadId};
+use mail::{get_thread_detail, MailStore, Message, ThreadDetail, ThreadId};
 use std::sync::Arc;
 
 use crate::app::OrionApp;
@@ -12,7 +12,7 @@ use crate::components::MessageCard;
 
 /// Thread view showing messages in a conversation
 pub struct ThreadView {
-    store: Arc<InMemoryMailStore>,
+    store: Arc<dyn MailStore>,
     thread_id: ThreadId,
     detail: Option<ThreadDetail>,
     is_loading: bool,
@@ -21,7 +21,7 @@ pub struct ThreadView {
 }
 
 impl ThreadView {
-    pub fn new(store: Arc<InMemoryMailStore>, thread_id: ThreadId) -> Self {
+    pub fn new(store: Arc<dyn MailStore>, thread_id: ThreadId) -> Self {
         Self {
             store,
             thread_id,
@@ -181,7 +181,7 @@ impl Render for ThreadView {
             .child(if self.is_loading {
                 self.render_loading(cx).into_any_element()
             } else if let Some(ref error) = self.error_message.clone() {
-                self.render_error(&error, cx).into_any_element()
+                self.render_error(error, cx).into_any_element()
             } else if let Some(ref detail) = self.detail.clone() {
                 self.render_messages(&detail.messages, cx).into_any_element()
             } else {

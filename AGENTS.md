@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Cosmos is a Rust workspace containing desktop applications built with GPUI. Currently contains:
-- **Orion** - A mail application with read-only Gmail integration (Phase 1)
+- **Orion** - A mail application with read-only Gmail integration (Phase 2: full library sync + persistence + sidebar navigation)
 - **mail** - Shared mail business logic library (UniFFI-ready, platform-independent)
 
-See `phase_1.md` for the detailed implementation plan for Phase 1.
+See `docs/phase_1.md` and `docs/phase_2.md` for implementation plans.
 
 ## Build System
 
@@ -123,16 +123,29 @@ The `mail` crate provides platform-independent mail functionality:
 
 ```rust
 // Example usage in orion UI code
-use mail::{sync_inbox, list_threads, MailStore, GmailClient, GmailCredentials};
+use mail::{
+    sync_gmail, sync_inbox, list_threads, MailStore,
+    GmailClient, GmailCredentials, RedbMailStore, SyncOptions, SyncState
+};
 ```
 
 **Key modules:**
-- `models/` - Domain types (Thread, Message, EmailAddress)
-- `gmail/` - Gmail API client and OAuth (uses `ureq` for sync HTTP)
-- `storage/` - Storage trait abstractions
-- `sync/` - Idempotent sync engine
+- `models/` - Domain types (Thread, Message, EmailAddress, SyncState, Label)
+- `gmail/` - Gmail API client, OAuth, History API, and Labels API (uses `ureq` for sync HTTP)
+- `storage/` - Storage trait abstractions with InMemoryMailStore and RedbMailStore
+- `sync/` - Idempotent sync engine with incremental sync support
 - `query/` - Query API for UI consumption
 - `config` - Gmail credential loading
+
+**Storage implementations:**
+- `InMemoryMailStore` - For testing and development
+- `RedbMailStore` - Persistent storage using redb (Phase 2)
+
+**Sync modes (Phase 2):**
+- Initial sync: Full fetch of entire mailbox (all labels, not just inbox)
+- Incremental sync: Uses Gmail History API to fetch only new messages
+- Automatic fallback: Falls back to initial sync if history ID expires
+- Messages include label_ids for filtering by folder (Inbox, Sent, etc.)
 
 **Important: The mail crate is fully synchronous.** It uses `ureq` (sync HTTP) and `std::fs` (sync file I/O) to be executor-agnostic. See `docs/async.md` for details.
 
@@ -147,12 +160,13 @@ Orion is a mail application built with GPUI (v0.2.2), a GPU-accelerated UI frame
 
 **Application structure:**
 - Entry point: `src/main.rs` - Application bootstrap
-- `src/app.rs` - Root app component
+- `src/app.rs` - Root app component with sidebar navigation
 - `src/views/` - GPUI view components (inbox, thread)
-- `src/components/` - Reusable UI components
+- `src/components/` - Reusable UI components (sidebar, thread list, message card)
 - Uses GPUI's `Application` and `Window` APIs
 - Implements the `Render` trait for UI components
 - UI is built using a declarative builder pattern with methods like `div()`, `flex()`, `bg()`, etc.
+- Sidebar shows mailbox labels (Inbox, Sent, Drafts, etc.) using gpui-component theme variables
 
 **GPUI patterns used:**
 - Component rendering via `Render` trait
@@ -228,14 +242,14 @@ Theme::change(ThemeMode::Dark, None, cx);
 
 ## Cosmos Integration
 
-The `mail` crate depends on Cosmos OS abstractions for persistence and graph operations:
-- `cosmos-storage` - Storage layer abstraction
-- `cosmos-graph` - Graph database operations
-- `cosmos-query` - Query API for data retrieval
+The `mail` crate uses trait abstractions for storage:
+- `MailStore` trait - Abstract storage interface
+- `InMemoryMailStore` - In-memory stub for testing
+- `RedbMailStore` - Persistent storage using redb (Phase 2)
 
-**Phase 1 Strategy**: These dependencies are stubbed with in-memory implementations in `cosmos-stubs/`. The `mail` crate uses trait abstractions (e.g., `MailStore` trait) to allow swapping between stub and real implementations.
+**Phase 2**: Uses `redb` for persistent local storage at `~/.config/cosmos/mail.redb`. The `MailStore` trait allows swapping implementations.
 
-**Future**: Real Cosmos implementations will replace stubs in Phase 2+.
+**Future**: Real Cosmos graph storage implementations may replace redb in later phases.
 
 ## Rust Edition
 
@@ -311,3 +325,8 @@ To use Gmail integration:
    - Click "Sync" button
    - Follow device flow prompts in terminal
    - Token saved to `~/.config/cosmos/gmail-tokens.json`
+
+**Data files (Phase 2):**
+- `~/.config/cosmos/mail.redb` - Persistent mail storage (threads, messages, sync state)
+- `~/.config/cosmos/gmail-tokens.json` - OAuth tokens
+- `~/.config/cosmos/google-credentials.json` - OAuth client credentials

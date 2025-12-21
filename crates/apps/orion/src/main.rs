@@ -5,6 +5,7 @@
 use gpui::prelude::*;
 use gpui::{px, size, Application, WindowOptions};
 use gpui_component::{Theme, ThemeMode, TitleBar};
+use log::{error, info, warn};
 use mail::GmailCredentials;
 
 mod app;
@@ -14,9 +15,14 @@ mod views;
 use app::OrionApp;
 
 fn main() {
+    // Initialize logging
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .init();
+
     // Bootstrap config directory
     if let Err(e) = config::init() {
-        eprintln!("Failed to initialize config directory: {}", e);
+        error!("Failed to initialize config directory: {}", e);
     }
 
     Application::new().run(|cx| {
@@ -41,19 +47,18 @@ fn main() {
                 match GmailCredentials::load() {
                     Ok(creds) => {
                         if let Err(e) = app.init_gmail(creds.client_id, creds.client_secret) {
-                            eprintln!("Failed to initialize Gmail client: {}", e);
+                            error!("Failed to initialize Gmail client: {}", e);
                         } else {
-                            println!("Gmail client initialized successfully");
+                            info!("Gmail client initialized successfully");
                         }
                     }
                     Err(e) => {
-                        eprintln!("Gmail credentials not found: {}", e);
+                        warn!("Gmail credentials not found: {}", e);
                         if let Some(path) = GmailCredentials::default_credentials_path() {
-                            eprintln!(
-                                "\nTo configure Gmail access, either:\n\
-                                 1. Place your Google OAuth credentials at:\n   {}\n\
-                                 2. Or set environment variables:\n   \
-                                    GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET",
+                            warn!(
+                                "To configure Gmail access, either:\n\
+                                 1. Place your Google OAuth credentials at: {}\n\
+                                 2. Or set environment variables: GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET",
                                 path.display()
                             );
                         }
@@ -65,8 +70,8 @@ fn main() {
                 app.wire_navigation(app_handle, cx);
 
                 // Load initial threads
-                if let Some(inbox) = &app.inbox_view {
-                    inbox.update(cx, |view, cx| view.load_threads(cx));
+                if let Some(thread_list) = &app.thread_list_view {
+                    thread_list.update(cx, |view, cx| view.load_threads(cx));
                 }
 
                 app
@@ -74,6 +79,6 @@ fn main() {
         })
         .expect("Failed to open window");
 
-        println!("App started successfully");
+        info!("Orion started successfully");
     });
 }

@@ -1,7 +1,7 @@
 //! GPUI view components for Orion mail app
 
-mod inbox;
 mod thread;
+mod thread_list;
 
-pub use inbox::InboxView;
 pub use thread::ThreadView;
+pub use thread_list::ThreadListView;

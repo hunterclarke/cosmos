@@ -60,6 +60,26 @@ pub fn list_threads(
     Ok(threads.into_iter().map(ThreadSummary::from).collect())
 }
 
+/// List threads by label with pagination
+///
+/// Returns threads that have at least one message with the given label,
+/// sorted by last_message_at descending (newest first).
+///
+/// # Arguments
+/// * `store` - The storage backend
+/// * `label` - The label ID to filter by (e.g., "INBOX", "SENT")
+/// * `limit` - Maximum number of threads to return
+/// * `offset` - Number of threads to skip
+pub fn list_threads_by_label(
+    store: &dyn MailStore,
+    label: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ThreadSummary>> {
+    let threads = store.list_threads_by_label(label, limit, offset)?;
+    Ok(threads.into_iter().map(ThreadSummary::from).collect())
+}
+
 /// Get detailed thread information including all messages
 ///
 /// # Arguments

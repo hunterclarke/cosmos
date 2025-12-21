@@ -8,16 +8,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use super::MailStore;
-use crate::models::{Message, MessageId, Thread, ThreadId};
+use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 
 /// In-memory implementation of MailStore
 ///
 /// Uses HashMaps protected by RwLocks for thread-safe access.
-/// This is a stub implementation for Phase 1.
+/// This is a stub implementation for Phase 1, extended for Phase 2.
 pub struct InMemoryMailStore {
     threads: RwLock<HashMap<String, Thread>>,
     messages: RwLock<HashMap<String, Message>>,
     thread_messages: RwLock<HashMap<String, HashSet<String>>>,
+    /// Sync state per account (Phase 2)
+    sync_states: RwLock<HashMap<String, SyncState>>,
 }
 
 impl InMemoryMailStore {
@@ -27,6 +29,7 @@ impl InMemoryMailStore {
             threads: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
             thread_messages: RwLock::new(HashMap::new()),
+            sync_states: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -90,6 +93,39 @@ impl MailStore for InMemoryMailStore {
         Ok(result)
     }
 
+    fn list_threads_by_label(
+        &self,
+        label: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>> {
+        let messages = self.messages.read().unwrap();
+        let threads = self.threads.read().unwrap();
+
+        // Find all thread IDs that have at least one message with this label
+        let mut matching_thread_ids: HashSet<String> = HashSet::new();
+        for message in messages.values() {
+            if message.label_ids.contains(&label.to_string()) {
+                matching_thread_ids.insert(message.thread_id.0.clone());
+            }
+        }
+
+        // Get matching threads
+        let mut thread_list: Vec<_> = threads
+            .values()
+            .filter(|t| matching_thread_ids.contains(&t.id.0))
+            .cloned()
+            .collect();
+
+        // Sort by last_message_at descending
+        thread_list.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+
+        // Apply pagination
+        let result = thread_list.into_iter().skip(offset).take(limit).collect();
+
+        Ok(result)
+    }
+
     fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<Message>> {
         let thread_messages = self.thread_messages.read().unwrap();
         let messages = self.messages.read().unwrap();
@@ -132,6 +168,39 @@ impl MailStore for InMemoryMailStore {
         self.threads.write().unwrap().clear();
         self.messages.write().unwrap().clear();
         self.thread_messages.write().unwrap().clear();
+        self.sync_states.write().unwrap().clear();
+        Ok(())
+    }
+
+    // === Phase 2: Sync State Methods ===
+
+    fn get_sync_state(&self, account_id: &str) -> Result<Option<SyncState>> {
+        let states = self.sync_states.read().unwrap();
+        Ok(states.get(account_id).cloned())
+    }
+
+    fn save_sync_state(&self, state: SyncState) -> Result<()> {
+        let mut states = self.sync_states.write().unwrap();
+        states.insert(state.account_id.clone(), state);
+        Ok(())
+    }
+
+    fn delete_sync_state(&self, account_id: &str) -> Result<()> {
+        let mut states = self.sync_states.write().unwrap();
+        states.remove(account_id);
+        Ok(())
+    }
+
+    fn has_thread(&self, id: &ThreadId) -> Result<bool> {
+        let threads = self.threads.read().unwrap();
+        Ok(threads.contains_key(&id.0))
+    }
+
+    fn clear_mail_data(&self) -> Result<()> {
+        self.threads.write().unwrap().clear();
+        self.messages.write().unwrap().clear();
+        self.thread_messages.write().unwrap().clear();
+        // Note: sync_states is NOT cleared
         Ok(())
     }
 }
@@ -267,5 +336,73 @@ mod tests {
         store.clear().unwrap();
 
         assert_eq!(store.count_threads().unwrap(), 0);
+    }
+
+    // === Phase 2: Sync State Tests ===
+
+    #[test]
+    fn test_sync_state_crud() {
+        let store = InMemoryMailStore::new();
+
+        // Initially no sync state
+        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+
+        // Save sync state
+        let state = SyncState::new("user@gmail.com", "12345");
+        store.save_sync_state(state).unwrap();
+
+        // Retrieve it
+        let retrieved = store.get_sync_state("user@gmail.com").unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.account_id, "user@gmail.com");
+        assert_eq!(retrieved.history_id, "12345");
+
+        // Update it
+        let updated = SyncState::new("user@gmail.com", "67890");
+        store.save_sync_state(updated).unwrap();
+
+        let retrieved = store.get_sync_state("user@gmail.com").unwrap().unwrap();
+        assert_eq!(retrieved.history_id, "67890");
+
+        // Delete it
+        store.delete_sync_state("user@gmail.com").unwrap();
+        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_has_thread() {
+        let store = InMemoryMailStore::new();
+
+        assert!(!store.has_thread(&ThreadId::new("t1")).unwrap());
+
+        store.upsert_thread(make_test_thread("t1", "Test")).unwrap();
+
+        assert!(store.has_thread(&ThreadId::new("t1")).unwrap());
+    }
+
+    #[test]
+    fn test_clear_mail_data_preserves_sync_state() {
+        let store = InMemoryMailStore::new();
+
+        // Add mail data and sync state
+        store.upsert_thread(make_test_thread("t1", "Test")).unwrap();
+        store.upsert_message(make_test_message("m1", "t1")).unwrap();
+        store
+            .save_sync_state(SyncState::new("user@gmail.com", "12345"))
+            .unwrap();
+
+        assert_eq!(store.count_threads().unwrap(), 1);
+        assert!(store.get_sync_state("user@gmail.com").unwrap().is_some());
+
+        // Clear mail data only
+        store.clear_mail_data().unwrap();
+
+        // Mail data is gone
+        assert_eq!(store.count_threads().unwrap(), 0);
+        assert!(!store.has_message(&MessageId::new("m1")).unwrap());
+
+        // But sync state is preserved
+        assert!(store.get_sync_state("user@gmail.com").unwrap().is_some());
     }
 }

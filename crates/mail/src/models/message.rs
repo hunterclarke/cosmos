@@ -114,6 +114,8 @@ pub struct Message {
     pub received_at: DateTime<Utc>,
     /// Gmail's internal timestamp (milliseconds since epoch)
     pub internal_date: i64,
+    /// Gmail label IDs (e.g., "INBOX", "SENT", "UNREAD")
+    pub label_ids: Vec<String>,
 }
 
 impl Message {
@@ -134,6 +136,7 @@ pub struct MessageBuilder {
     body_preview: String,
     received_at: Option<DateTime<Utc>>,
     internal_date: i64,
+    label_ids: Vec<String>,
 }
 
 impl MessageBuilder {
@@ -148,6 +151,7 @@ impl MessageBuilder {
             body_preview: String::new(),
             received_at: None,
             internal_date: 0,
+            label_ids: Vec::new(),
         }
     }
 
@@ -186,6 +190,11 @@ impl MessageBuilder {
         self
     }
 
+    pub fn label_ids(mut self, label_ids: Vec<String>) -> Self {
+        self.label_ids = label_ids;
+        self
+    }
+
     pub fn build(self) -> Message {
         Message {
             id: self.id,
@@ -199,6 +208,7 @@ impl MessageBuilder {
             body_preview: self.body_preview,
             received_at: self.received_at.unwrap_or_else(Utc::now),
             internal_date: self.internal_date,
+            label_ids: self.label_ids,
         }
     }
 }

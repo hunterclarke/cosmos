@@ -1,7 +1,8 @@
 //! Sync engine for fetching and storing mail
 //!
 //! Provides idempotent sync operations that can be safely retried.
+//! Supports both initial full sync and incremental sync via Gmail History API.
 
 mod inbox;
 
-pub use inbox::{SyncStats, sync_inbox};
+pub use inbox::{SyncOptions, SyncStats, sync_gmail, sync_inbox};

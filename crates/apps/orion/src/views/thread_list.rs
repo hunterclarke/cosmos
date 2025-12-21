@@ -1,26 +1,35 @@
-//! Inbox view - displays list of email threads
+//! Thread list view - displays list of email threads filtered by label
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::ActiveTheme;
-use mail::{list_threads, storage::InMemoryMailStore, ThreadId, ThreadSummary};
+use gpui_component::{v_virtual_list, ActiveTheme, VirtualListScrollHandle};
+use log::{debug, error, info};
+use mail::{list_threads, list_threads_by_label, MailStore, ThreadId, ThreadSummary};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::app::OrionApp;
 use crate::components::ThreadListItem;
 
-/// Inbox view showing list of threads
-pub struct InboxView {
-    store: Arc<InMemoryMailStore>,
+/// Height of each thread list item
+const THREAD_ITEM_HEIGHT: f32 = 72.0;
+
+/// Thread list view showing threads filtered by label
+pub struct ThreadListView {
+    store: Arc<dyn MailStore>,
     threads: Vec<ThreadSummary>,
     selected_thread: Option<ThreadId>,
     is_loading: bool,
     error_message: Option<String>,
     app: Option<Entity<OrionApp>>,
+    scroll_handle: VirtualListScrollHandle,
+    item_sizes: Rc<Vec<Size<Pixels>>>,
+    /// Current label filter (e.g., "INBOX", "SENT", etc.)
+    label_filter: Option<String>,
 }
 
-impl InboxView {
-    pub fn new(store: Arc<InMemoryMailStore>) -> Self {
+impl ThreadListView {
+    pub fn new(store: Arc<dyn MailStore>) -> Self {
         Self {
             store,
             threads: Vec::new(),
@@ -28,6 +37,9 @@ impl InboxView {
             is_loading: false,
             error_message: None,
             app: None,
+            scroll_handle: VirtualListScrollHandle::new(),
+            item_sizes: Rc::new(Vec::new()),
+            label_filter: Some("INBOX".to_string()),
         }
     }
 
@@ -36,16 +48,62 @@ impl InboxView {
         self.app = Some(app);
     }
 
+    /// Set the label filter and reload threads
+    pub fn set_label_filter(&mut self, label: String, cx: &mut Context<Self>) {
+        self.label_filter = Some(label);
+        self.load_threads(cx);
+        cx.notify();
+    }
+
+    /// Get the display name for the current label
+    fn current_label_name(&self) -> &str {
+        match self.label_filter.as_deref() {
+            Some("INBOX") => "Inbox",
+            Some("SENT") => "Sent",
+            Some("DRAFT") => "Drafts",
+            Some("TRASH") => "Trash",
+            Some("SPAM") => "Spam",
+            Some("STARRED") => "Starred",
+            Some("IMPORTANT") => "Important",
+            Some("ALL") => "All Mail",
+            Some(other) => other,
+            None => "All Mail",
+        }
+    }
+
     pub fn load_threads(&mut self, _cx: &mut Context<Self>) {
         self.is_loading = true;
         self.error_message = None;
 
-        match list_threads(self.store.as_ref(), 100, 0) {
+        // Use storage-layer filtering for efficiency
+        // "ALL" means all mail - no filtering
+        let result = match self.label_filter.as_deref() {
+            None | Some("ALL") => {
+                debug!("Loading all threads (no filter)");
+                list_threads(self.store.as_ref(), 500, 0)
+            }
+            Some(label) => {
+                debug!("Loading threads with label filter: {}", label);
+                list_threads_by_label(self.store.as_ref(), label, 500, 0)
+            }
+        };
+
+        match result {
             Ok(threads) => {
+                info!("Loaded {} threads", threads.len());
+
+                // Update item sizes for virtual list
+                self.item_sizes = Rc::new(
+                    threads
+                        .iter()
+                        .map(|_| size(px(10000.), px(THREAD_ITEM_HEIGHT)))
+                        .collect(),
+                );
                 self.threads = threads;
                 self.is_loading = false;
             }
             Err(e) => {
+                error!("Failed to load threads: {}", e);
                 self.error_message = Some(format!("Failed to load threads: {}", e));
                 self.is_loading = false;
             }
@@ -64,6 +122,7 @@ impl InboxView {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let label_name = self.current_label_name().to_string();
 
         div()
             .w_full()
@@ -80,7 +139,7 @@ impl InboxView {
                     .text_lg()
                     .font_weight(FontWeight::BOLD)
                     .text_color(theme.foreground)
-                    .child("Inbox"),
+                    .child(label_name),
             )
             .child(
                 div()
@@ -151,8 +210,6 @@ impl InboxView {
     }
 
     fn render_thread_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let threads = self.threads.clone();
-        let selected = self.selected_thread.clone();
         let theme = cx.theme();
 
         div()
@@ -161,21 +218,41 @@ impl InboxView {
             .flex_1()
             .overflow_hidden()
             .bg(theme.list)
-            .children(threads.into_iter().map(|thread| {
-                let is_selected = selected.as_ref().is_some_and(|s| s.0 == thread.id.0);
-                let thread_id = thread.id.clone();
+            .child(
+                v_virtual_list(
+                    cx.entity().clone(),
+                    "thread-list",
+                    self.item_sizes.clone(),
+                    |view, visible_range, _window, cx| {
+                        visible_range
+                            .map(|ix| {
+                                let thread = view.threads[ix].clone();
+                                let is_selected = view
+                                    .selected_thread
+                                    .as_ref()
+                                    .is_some_and(|s| s.0 == thread.id.0);
+                                let thread_id = thread.id.clone();
 
-                div()
-                    .id(ElementId::Name(thread_id.0.clone().into()))
-                    .on_click(cx.listener(move |view, _event, _window, cx| {
-                        view.select_thread(thread_id.clone(), cx);
-                    }))
-                    .child(ThreadListItem::new(thread, is_selected))
-            }))
+                                div()
+                                    .id(ElementId::Name(thread_id.0.clone().into()))
+                                    .h(px(THREAD_ITEM_HEIGHT))
+                                    .w_full()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |view, _event, _window, cx| {
+                                        view.select_thread(thread_id.clone(), cx);
+                                    }))
+                                    .child(ThreadListItem::new(thread, is_selected))
+                            })
+                            .collect()
+                    },
+                )
+                .flex_1()
+                .track_scroll(&self.scroll_handle),
+            )
     }
 }
 
-impl Render for InboxView {
+impl Render for ThreadListView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -188,7 +265,7 @@ impl Render for InboxView {
             .child(if self.is_loading {
                 self.render_loading(cx).into_any_element()
             } else if let Some(ref error) = self.error_message.clone() {
-                self.render_error(&error, cx).into_any_element()
+                self.render_error(error, cx).into_any_element()
             } else if self.threads.is_empty() {
                 self.render_empty(cx).into_any_element()
             } else {
