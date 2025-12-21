@@ -108,8 +108,14 @@ pub struct Message {
     pub cc: Vec<EmailAddress>,
     /// Subject line
     pub subject: String,
-    /// Plain text preview of the body
+    /// Plain text preview of the body (snippet)
     pub body_preview: String,
+    /// Full plain text body content
+    #[serde(default)]
+    pub body_text: Option<String>,
+    /// Full HTML body content
+    #[serde(default)]
+    pub body_html: Option<String>,
     /// When the message was received
     pub received_at: DateTime<Utc>,
     /// Gmail's internal timestamp (milliseconds since epoch)
@@ -134,6 +140,8 @@ pub struct MessageBuilder {
     cc: Vec<EmailAddress>,
     subject: String,
     body_preview: String,
+    body_text: Option<String>,
+    body_html: Option<String>,
     received_at: Option<DateTime<Utc>>,
     internal_date: i64,
     label_ids: Vec<String>,
@@ -149,6 +157,8 @@ impl MessageBuilder {
             cc: Vec::new(),
             subject: String::new(),
             body_preview: String::new(),
+            body_text: None,
+            body_html: None,
             received_at: None,
             internal_date: 0,
             label_ids: Vec::new(),
@@ -180,6 +190,16 @@ impl MessageBuilder {
         self
     }
 
+    pub fn body_text(mut self, body_text: Option<String>) -> Self {
+        self.body_text = body_text;
+        self
+    }
+
+    pub fn body_html(mut self, body_html: Option<String>) -> Self {
+        self.body_html = body_html;
+        self
+    }
+
     pub fn received_at(mut self, received_at: DateTime<Utc>) -> Self {
         self.received_at = Some(received_at);
         self
@@ -206,6 +226,8 @@ impl MessageBuilder {
             cc: self.cc,
             subject: self.subject,
             body_preview: self.body_preview,
+            body_text: self.body_text,
+            body_html: self.body_html,
             received_at: self.received_at.unwrap_or_else(Utc::now),
             internal_date: self.internal_date,
             label_ids: self.label_ids,

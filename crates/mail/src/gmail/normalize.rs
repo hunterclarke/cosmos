@@ -41,11 +41,15 @@ pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
         .single()
         .unwrap_or_else(Utc::now);
 
+    // Extract full body content (both text and HTML)
+    let body_text = extract_plain_text_body(payload);
+    let body_html = extract_html_body(payload);
+
     // Extract body preview - prefer the snippet, fall back to extracting from body
     let body_preview = if !gmail_msg.snippet.is_empty() {
         decode_html_entities(&gmail_msg.snippet)
     } else {
-        extract_plain_text_body(payload).unwrap_or_default()
+        body_text.clone().unwrap_or_default()
     };
 
     // Extract label IDs
@@ -57,6 +61,8 @@ pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
         .cc(cc)
         .subject(subject)
         .body_preview(body_preview)
+        .body_text(body_text)
+        .body_html(body_html)
         .received_at(received_at)
         .internal_date(internal_date)
         .label_ids(label_ids)
@@ -131,6 +137,55 @@ fn find_plain_text_in_parts(parts: &[MessagePart]) -> Option<String> {
             && let Some(text) = find_plain_text_in_parts(nested)
         {
             return Some(text);
+        }
+    }
+
+    None
+}
+
+/// Extract HTML body from message payload
+fn extract_html_body(payload: &MessagePayload) -> Option<String> {
+    // Check if this is a simple message with HTML body
+    if let Some(body) = &payload.body
+        && let Some(data) = &body.data
+        && payload
+            .mime_type
+            .as_ref()
+            .is_some_and(|m| m.starts_with("text/html"))
+    {
+        return decode_base64_body(data);
+    }
+
+    // Check parts for text/html
+    if let Some(parts) = &payload.parts
+        && let Some(html) = find_html_in_parts(parts)
+    {
+        return Some(html);
+    }
+
+    None
+}
+
+/// Recursively search message parts for text/html content
+fn find_html_in_parts(parts: &[MessagePart]) -> Option<String> {
+    for part in parts {
+        // Check if this part is text/html
+        if part
+            .mime_type
+            .as_ref()
+            .is_some_and(|m| m.starts_with("text/html"))
+            && let Some(body) = &part.body
+            && let Some(data) = &body.data
+            && let Some(html) = decode_base64_body(data)
+        {
+            return Some(html);
+        }
+
+        // Recursively check nested parts
+        if let Some(nested) = &part.parts
+            && let Some(html) = find_html_in_parts(nested)
+        {
+            return Some(html);
         }
     }
 
