@@ -28,6 +28,9 @@ fn make_thread(id: &str, subject: &str, message_count: usize, age_hours: i64) ->
         format!("Snippet for thread {}", id),
         Utc::now() - chrono::Duration::hours(age_hours),
         message_count,
+        Some("Test User".to_string()),
+        "test@example.com".to_string(),
+        false,
     )
 }
 

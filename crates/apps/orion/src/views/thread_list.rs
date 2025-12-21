@@ -2,7 +2,9 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{v_virtual_list, ActiveTheme, VirtualListScrollHandle};
+use gpui_component::scroll::Scrollbar;
+use gpui_component::spinner::Spinner;
+use gpui_component::{v_virtual_list, ActiveTheme, Sizable, Size as ComponentSize, VirtualListScrollHandle};
 use log::{debug, error, info};
 use mail::{list_threads, list_threads_by_label, MailStore, ThreadId, ThreadSummary};
 use std::rc::Rc;
@@ -11,8 +13,8 @@ use std::sync::Arc;
 use crate::app::OrionApp;
 use crate::components::ThreadListItem;
 
-/// Height of each thread list item
-const THREAD_ITEM_HEIGHT: f32 = 72.0;
+/// Height of each thread list item (2 lines: subject, snippet + padding)
+const THREAD_ITEM_HEIGHT: f32 = 56.0;
 
 /// Thread list view showing threads filtered by label
 pub struct ThreadListView {
@@ -124,6 +126,16 @@ impl ThreadListView {
         let theme = cx.theme();
         let label_name = self.current_label_name().to_string();
 
+        // Count total threads and unread threads
+        let total_count = self.threads.len();
+        let unread_count = self.threads.iter().filter(|t| t.is_unread).count();
+
+        let stats_text = if unread_count > 0 {
+            format!("{} messages, {} unread", total_count, unread_count)
+        } else {
+            format!("{} messages", total_count)
+        };
+
         div()
             .w_full()
             .px_4()
@@ -145,19 +157,27 @@ impl ThreadListView {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(format!("{} threads", self.threads.len())),
+                    .child(stats_text),
             )
     }
 
     fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        div().flex().flex_1().justify_center().items_center().child(
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("Loading..."),
-        )
+        div()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_2()
+            .child(Spinner::new().with_size(ComponentSize::Medium))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Loading..."),
+            )
     }
 
     fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -213,6 +233,7 @@ impl ThreadListView {
         let theme = cx.theme();
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -249,6 +270,7 @@ impl ThreadListView {
                 .flex_1()
                 .track_scroll(&self.scroll_handle),
             )
+            .child(Scrollbar::vertical(&self.scroll_handle))
     }
 }
 

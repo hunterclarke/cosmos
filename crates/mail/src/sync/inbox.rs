@@ -9,7 +9,7 @@ use log::{info, warn};
 use std::collections::HashSet;
 
 use crate::gmail::{normalize_message, GmailClient, HistoryExpiredError};
-use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
+use crate::models::{LabelId, Message, MessageId, SyncState, Thread, ThreadId};
 use crate::storage::MailStore;
 
 /// Options for sync operation
@@ -427,12 +427,24 @@ fn compute_thread(
         first.subject.clone()
     };
 
+    // Extract sender from first message
+    let sender_name = first.from.name.clone();
+    let sender_email = first.from.email.clone();
+
+    // Check if any message is unread
+    let is_unread = all_messages
+        .iter()
+        .any(|m| m.label_ids.iter().any(|l| l == LabelId::UNREAD));
+
     Ok(Thread::new(
         thread_id.clone(),
         subject,
         latest.body_preview.clone(),
         last_message_at,
         all_messages.len(),
+        sender_name,
+        sender_email,
+        is_unread,
     ))
 }
 

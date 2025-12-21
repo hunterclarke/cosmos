@@ -4,8 +4,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::spinner::Spinner;
 use gpui_component::theme::Theme;
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize};
 use mail::{get_thread_detail, MailStore, Message, ThreadDetail, ThreadId};
 use std::sync::Arc;
 
@@ -263,6 +264,11 @@ impl ThreadView {
             .unwrap_or_else(|| "Loading...".to_string());
 
         let message_count = self.detail.as_ref().map(|d| d.messages.len()).unwrap_or(0);
+        let message_count_text = if message_count == 1 {
+            "1 message".to_string()
+        } else {
+            format!("{} messages", message_count)
+        };
 
         div()
             .w_full()
@@ -273,15 +279,18 @@ impl ThreadView {
             .border_color(theme.border)
             .flex()
             .items_center()
-            .gap_4()
+            .gap_3()
+            // Back button with icon
             .child(
                 Button::new("back-button")
-                    .label("← Back")
+                    .icon(Icon::new(IconName::ArrowLeft).with_size(ComponentSize::Small))
                     .ghost()
+                    .cursor_pointer()
                     .on_click(cx.listener(|view, _event, _window, cx| {
                         view.go_back(cx);
                     })),
             )
+            // Subject and message count
             .child(
                 div()
                     .flex()
@@ -300,7 +309,30 @@ impl ThreadView {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(format!("{} messages", message_count)),
+                            .child(message_count_text),
+                    ),
+            )
+            // Action buttons
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("reply-button")
+                            .icon(Icon::new(IconName::ArrowLeft).with_size(ComponentSize::Small))
+                            .ghost()
+                            .label("Reply"),
+                    )
+                    .child(
+                        Button::new("archive-button")
+                            .icon(Icon::new(IconName::Folder).with_size(ComponentSize::Small))
+                            .ghost(),
+                    )
+                    .child(
+                        Button::new("delete-button")
+                            .icon(Icon::new(IconName::Delete).with_size(ComponentSize::Small))
+                            .ghost(),
                     ),
             )
     }
@@ -308,12 +340,20 @@ impl ThreadView {
     fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        div().flex().flex_1().justify_center().items_center().child(
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("Loading thread..."),
-        )
+        div()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .justify_center()
+            .items_center()
+            .gap_2()
+            .child(Spinner::new().with_size(ComponentSize::Medium))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Loading thread..."),
+            )
     }
 
     fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {

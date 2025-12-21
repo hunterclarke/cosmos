@@ -20,6 +20,12 @@ pub struct ThreadSummary {
     pub last_message_at: DateTime<Utc>,
     /// Number of messages in the thread
     pub message_count: usize,
+    /// Display name of the thread sender
+    pub sender_name: Option<String>,
+    /// Email address of the thread sender
+    pub sender_email: String,
+    /// Whether the thread has unread messages
+    pub is_unread: bool,
 }
 
 impl From<Thread> for ThreadSummary {
@@ -30,6 +36,9 @@ impl From<Thread> for ThreadSummary {
             snippet: thread.snippet,
             last_message_at: thread.last_message_at,
             message_count: thread.message_count,
+            sender_name: thread.sender_name,
+            sender_email: thread.sender_email,
+            is_unread: thread.is_unread,
         }
     }
 }
@@ -116,6 +125,9 @@ mod tests {
                 format!("Snippet {}", i),
                 Utc::now() - chrono::Duration::hours(i as i64),
                 2,
+                Some(format!("Test User {}", i)),
+                format!("test{}@example.com", i),
+                i % 2 == 0, // alternate unread
             );
             store.upsert_thread(thread).unwrap();
 

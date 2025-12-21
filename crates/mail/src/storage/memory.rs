@@ -268,6 +268,9 @@ mod tests {
             "Test snippet".to_string(),
             Utc::now(),
             1,
+            Some("Test User".to_string()),
+            "test@example.com".to_string(),
+            false,
         )
     }
 

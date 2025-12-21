@@ -5,7 +5,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::webview::WebView;
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size};
 use log::{error, info, warn};
 use mail::{
     sync_gmail, GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SyncOptions,
@@ -316,93 +316,145 @@ impl OrionApp {
         .detach();
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let is_syncing = self.is_syncing;
-        let theme = cx.theme();
-
-        div()
-            .w_full()
-            .px_4()
-            .pt_8() // Extra top padding for window controls
-            .pb_2()
-            .bg(theme.background)
-            .border_b_1()
-            .border_color(theme.border)
-            .flex()
-            .justify_between()
-            .items_center()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(theme.primary)
-                            .child("Orion"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Mail"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    // Show last sync timestamp
-                    .when_some(self.last_sync_at, |el, ts| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format_relative_time(ts)),
-                        )
-                    })
-                    // Show error if any
-                    .when_some(self.sync_error.clone(), |el, err| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.danger)
-                                .max_w(px(200.))
-                                .text_ellipsis()
-                                .child(err),
-                        )
-                    })
-                    .child(
-                        Button::new("sync-button")
-                            .label(if is_syncing { "Syncing..." } else { "Sync" })
-                            .primary()
-                            .loading(is_syncing)
-                            .on_click(cx.listener(|app, _event, _window, cx| {
-                                app.sync(cx);
-                            })),
-                    ),
-            )
-    }
-
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
         let labels = self.labels.clone();
         let selected = self.selected_label.clone();
+        let is_syncing = self.is_syncing;
+        let last_sync = self.last_sync_at;
 
         div()
-            .children(labels.into_iter().map(|label| {
-                let label_id = label.id.0.clone();
-                let is_selected = label_id == selected;
-
+            .flex()
+            .flex_col()
+            .h_full()
+            // Sidebar header with app branding
+            .child(
                 div()
-                    .id(ElementId::Name(format!("label-{}", label_id).into()))
-                    .on_click(cx.listener(move |app, _event, _window, cx| {
-                        app.select_label(label_id.clone(), cx);
-                    }))
-                    .child(crate::components::SidebarItem::new(label, is_selected))
-            }))
+                    .pt_8() // Extra top padding for window controls
+                    .pb_4()
+                    .px_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme.foreground)
+                                    .child("Orion"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Mail"),
+                            ),
+                    ),
+            )
+            // Navigation labels - fills remaining space
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_hidden()
+                    .px_2()
+                    .py_1()
+                    .children(labels.into_iter().map(|label| {
+                        let label_id = label.id.0.clone();
+                        let is_selected = label_id == selected;
+
+                        div()
+                            .id(ElementId::Name(format!("label-{}", label_id).into()))
+                            .on_click(cx.listener(move |app, _event, _window, cx| {
+                                app.select_label(label_id.clone(), cx);
+                            }))
+                            .child(crate::components::SidebarItem::new(label, is_selected))
+                    })),
+            )
+            // Sidebar footer with sync and profile
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    // Sync row
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        last_sync
+                                            .map(|ts| format_relative_time(ts))
+                                            .unwrap_or_else(|| "Not synced".to_string()),
+                                    ),
+                            )
+                            .child(
+                                Button::new("sync-button")
+                                    .icon(
+                                        Icon::new(IconName::LoaderCircle)
+                                            .with_size(Size::XSmall)
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .label(if is_syncing { "Syncing..." } else { "Sync" })
+                                    .small()
+                                    .ghost()
+                                    .loading(is_syncing)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|app, _event, _window, cx| {
+                                        app.sync(cx);
+                                    })),
+                            ),
+                    )
+                    // Profile row
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .size_8()
+                                    .rounded_full()
+                                    .bg(theme.primary)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.primary_foreground)
+                                    .child("U"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.foreground)
+                                            .text_ellipsis()
+                                            .child("user@gmail.com"),
+                                    ),
+                            ),
+                    ),
+            )
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -510,44 +562,32 @@ impl Render for OrionApp {
         let secondary_bg = theme.secondary;
         let border = theme.border;
 
-        let header = self.render_header(cx);
         let sidebar = self.render_sidebar(cx);
         let content = self.render_content(window, cx);
 
         div()
             .flex()
-            .flex_col()
+            .flex_row()
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .child(header)
+            // Sidebar
+            .child(
+                div()
+                    .w(px(240.))
+                    .h_full()
+                    .bg(secondary_bg)
+                    .border_r_1()
+                    .border_color(border)
+                    .child(sidebar),
+            )
+            // Main content
             .child(
                 div()
                     .flex()
-                    .flex_row()
                     .flex_1()
                     .overflow_hidden()
-                    // Sidebar
-                    .child(
-                        div()
-                            .w(px(220.))
-                            .h_full()
-                            .bg(secondary_bg)
-                            .border_r_1()
-                            .border_color(border)
-                            .flex()
-                            .flex_col()
-                            .p_2()
-                            .child(sidebar),
-                    )
-                    // Main content
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(content),
-                    ),
+                    .child(content),
             )
     }
 }

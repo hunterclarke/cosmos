@@ -2,7 +2,7 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size};
 use mail::{Label, LabelId};
 
 /// A single item in the sidebar navigation
@@ -32,6 +32,22 @@ impl SidebarItem {
             _ => &self.label.name,
         }
     }
+
+    /// Get the icon for this label
+    fn icon(&self) -> IconName {
+        let id = self.label.id.as_str();
+        match id {
+            LabelId::INBOX => IconName::Inbox,
+            LabelId::SENT => IconName::ArrowRight,
+            LabelId::DRAFTS => IconName::File,
+            LabelId::TRASH => IconName::Delete,
+            LabelId::SPAM => IconName::TriangleAlert,
+            LabelId::STARRED => IconName::Star,
+            LabelId::IMPORTANT => IconName::Bell,
+            LabelId::ALL_MAIL => IconName::Folder,
+            _ => IconName::Folder,
+        }
+    }
 }
 
 impl RenderOnce for SidebarItem {
@@ -58,12 +74,14 @@ impl RenderOnce for SidebarItem {
         };
 
         let display_name = self.display_name().to_string();
+        let icon_name = self.icon();
         let unread_count = self.label.unread_count;
 
         div()
             .w_full()
             .px_3()
-            .py_2()
+            .py_1p5()
+            .my_px()
             .rounded_md()
             .bg(bg_color)
             .border_l_2()
@@ -75,14 +93,25 @@ impl RenderOnce for SidebarItem {
             .items_center()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(text_color)
-                    .font_weight(if self.is_selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .child(display_name),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Icon::new(icon_name)
+                            .with_size(Size::Small)
+                            .text_color(text_color),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(text_color)
+                            .font_weight(if self.is_selected {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .child(display_name),
+                    ),
             )
             .when(unread_count > 0, |el| {
                 el.child(

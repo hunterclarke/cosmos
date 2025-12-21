@@ -42,6 +42,15 @@ pub struct Thread {
     pub last_message_at: DateTime<Utc>,
     /// Number of messages in the thread
     pub message_count: usize,
+    /// Display name of the thread sender (from first message)
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    /// Email address of the thread sender (from first message)
+    #[serde(default)]
+    pub sender_email: String,
+    /// Whether the thread has unread messages
+    #[serde(default)]
+    pub is_unread: bool,
 }
 
 impl Thread {
@@ -52,6 +61,9 @@ impl Thread {
         snippet: String,
         last_message_at: DateTime<Utc>,
         message_count: usize,
+        sender_name: Option<String>,
+        sender_email: String,
+        is_unread: bool,
     ) -> Self {
         Self {
             id,
@@ -59,6 +71,9 @@ impl Thread {
             snippet,
             last_message_at,
             message_count,
+            sender_name,
+            sender_email,
+            is_unread,
         }
     }
 }
