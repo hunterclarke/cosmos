@@ -1,0 +1,1 @@
+Are you familiar with the email app Superhuman (if not, research it)? I'd like to implement a superhuman like navigation, keyboard, and command palette support. Let's create a phase_3 plan in docs for this.

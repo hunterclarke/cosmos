@@ -19,6 +19,8 @@ pub struct SyncOptions {
     pub max_messages: Option<usize>,
     /// Force full resync even if history_id exists
     pub full_resync: bool,
+    /// Filter by label ID (e.g., "INBOX") - for debugging
+    pub label_filter: Option<String>,
 }
 
 /// Statistics from a sync operation
@@ -141,7 +143,11 @@ fn initial_sync(
         }
 
         // Fetch a page of message IDs
-        let list_response = gmail.list_messages(batch_size, page_token.as_deref())?;
+        let list_response = gmail.list_messages_with_label(
+            batch_size,
+            page_token.as_deref(),
+            options.label_filter.as_deref(),
+        )?;
         let message_refs = list_response.messages.unwrap_or_default();
 
         if message_refs.is_empty() {
@@ -382,6 +388,7 @@ pub fn sync_inbox(
     let options = SyncOptions {
         max_messages: Some(max_messages),
         full_resync: false,
+        label_filter: None,
     };
 
     sync_gmail(gmail, store, "default", options)

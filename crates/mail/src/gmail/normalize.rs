@@ -157,10 +157,10 @@ fn extract_html_body(payload: &MessagePayload) -> Option<String> {
     }
 
     // Check parts for text/html
-    if let Some(parts) = &payload.parts
-        && let Some(html) = find_html_in_parts(parts)
-    {
-        return Some(html);
+    if let Some(parts) = &payload.parts {
+        if let Some(html) = find_html_in_parts(parts) {
+            return Some(html);
+        }
     }
 
     None
@@ -192,11 +192,24 @@ fn find_html_in_parts(parts: &[MessagePart]) -> Option<String> {
     None
 }
 
-/// Decode base64url-encoded body data
+/// Decode base64-encoded body data
+///
+/// Gmail uses URL-safe base64 but padding can vary, so we try multiple decoders.
 fn decode_base64_body(data: &str) -> Option<String> {
-    // Gmail uses URL-safe base64 encoding
-    let decoded = BASE64_URL_SAFE_NO_PAD.decode(data).ok()?;
-    String::from_utf8(decoded).ok()
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE};
+
+    let decoders: &[&base64::engine::GeneralPurpose] =
+        &[&BASE64_URL_SAFE_NO_PAD, &URL_SAFE, &STANDARD, &STANDARD_NO_PAD];
+
+    for decoder in decoders {
+        if let Ok(decoded) = decoder.decode(data) {
+            if let Ok(s) = String::from_utf8(decoded) {
+                return Some(s);
+            }
+        }
+    }
+
+    None
 }
 
 /// Decode HTML entities in snippet text

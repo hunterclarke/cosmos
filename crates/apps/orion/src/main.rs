@@ -10,6 +10,7 @@ use mail::GmailCredentials;
 
 mod app;
 mod components;
+mod templates;
 mod views;
 
 use app::OrionApp;
@@ -25,7 +26,9 @@ fn main() {
         error!("Failed to initialize config directory: {}", e);
     }
 
-    Application::new().run(|cx| {
+    Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .run(|cx| {
         // Initialize gpui-component and set dark mode
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);

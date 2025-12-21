@@ -42,6 +42,21 @@ impl GmailClient {
         max_results: usize,
         page_token: Option<&str>,
     ) -> Result<ListMessagesResponse> {
+        self.list_messages_with_label(max_results, page_token, None)
+    }
+
+    /// List message IDs from the user's mailbox, optionally filtered by label
+    ///
+    /// # Arguments
+    /// * `max_results` - Maximum number of messages to return per page (1-500)
+    /// * `page_token` - Optional page token for pagination
+    /// * `label_id` - Optional label ID to filter by (e.g., "INBOX")
+    pub fn list_messages_with_label(
+        &self,
+        max_results: usize,
+        page_token: Option<&str>,
+        label_id: Option<&str>,
+    ) -> Result<ListMessagesResponse> {
         let access_token = self.auth.get_access_token()?;
 
         let mut url = format!(
@@ -52,6 +67,10 @@ impl GmailClient {
 
         if let Some(token) = page_token {
             url.push_str(&format!("&pageToken={}", token));
+        }
+
+        if let Some(label) = label_id {
+            url.push_str(&format!("&labelIds={}", label));
         }
 
         let mut response = ureq::get(&url)

@@ -1,0 +1,49 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug executable 'orion'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["run", "--bin=orion", "--package=orion"]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'orion'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--bin=orion", "--package=orion"]
+      }
+    },
+    {
+      "name": "Debug unit tests in library 'config'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--package=config"]
+      }
+    },
+    {
+      "name": "Debug unit tests in library 'mail'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--package=mail"]
+      }
+    },
+    {
+      "name": "Debug integration test 'integration_tests'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--test=integration_tests", "--package=mail"]
+      }
+    }
+  ]
+}

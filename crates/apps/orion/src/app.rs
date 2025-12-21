@@ -5,16 +5,17 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::webview::WebView;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size};
+use gpui_component::{ActiveTheme, Sizable};
 use log::{error, info, warn};
 use mail::{
-    sync_gmail, GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SyncOptions,
-    ThreadId,
+    GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SyncOptions, ThreadId,
+    sync_gmail,
 };
 use std::sync::Arc;
 use wry::WebViewBuilder;
 
 use crate::components::Sidebar;
+use crate::templates;
 use crate::views::{ThreadListView, ThreadView};
 
 /// Current view in the application
@@ -23,7 +24,7 @@ pub enum View {
     Inbox,
     Thread {
         /// Pre-generated HTML for the thread (generated on navigation, not during render)
-        html: Option<String>,
+        html: String,
     },
 }
 
@@ -44,6 +45,8 @@ pub struct OrionApp {
     selected_label: String,
     /// Shared WebView for HTML email rendering (created lazily)
     webview: Option<Entity<WebView>>,
+    /// Currently loaded WebView content (to avoid reloading on every render)
+    webview_loaded_html: Option<String>,
 }
 
 impl OrionApp {
@@ -52,7 +55,10 @@ impl OrionApp {
         let store: Arc<dyn MailStore> = match Self::create_persistent_store() {
             Ok(store) => Arc::new(store),
             Err(e) => {
-                warn!("Failed to create persistent storage: {}, using in-memory", e);
+                warn!(
+                    "Failed to create persistent storage: {}, using in-memory",
+                    e
+                );
                 Arc::new(mail::InMemoryMailStore::new())
             }
         };
@@ -80,11 +86,16 @@ impl OrionApp {
             labels: Sidebar::default_labels(),
             selected_label: LabelId::INBOX.to_string(),
             webview: None,
+            webview_loaded_html: None,
         }
     }
 
     /// Get or create the shared WebView
-    fn get_or_create_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<WebView> {
+    fn get_or_create_webview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WebView> {
         if let Some(ref webview) = self.webview {
             return webview.clone();
         }
@@ -115,12 +126,14 @@ impl OrionApp {
     }
 
     /// Hide the shared WebView
-    pub fn hide_webview(&self, cx: &mut Context<Self>) {
+    pub fn hide_webview(&mut self, cx: &mut Context<Self>) {
         if let Some(ref webview) = self.webview {
             webview.update(cx, |wv, _| {
                 wv.hide();
             });
         }
+        // Clear loaded content so it will reload when shown again
+        self.webview_loaded_html = None;
     }
 
     /// Create persistent storage in the config directory
@@ -168,6 +181,7 @@ impl OrionApp {
     pub fn show_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         // Load thread data and generate HTML upfront (not during render)
         let store = self.store.clone();
+        let theme = cx.theme();
         let thread_html = match mail::get_thread_detail(store.as_ref(), &thread_id) {
             Ok(Some(detail)) => {
                 info!(
@@ -175,19 +189,17 @@ impl OrionApp {
                     thread_id.as_str(),
                     detail.messages.len()
                 );
-                // Always generate HTML for consistent WebView rendering
-                let theme = cx.theme();
-                let html = crate::views::generate_thread_html(&detail.messages, &theme);
+                let html = templates::thread_html(&detail.messages, &theme);
                 info!("Generated HTML with {} bytes", html.len());
-                Some(html)
+                html
             }
             Ok(None) => {
                 warn!("Thread {} not found", thread_id.as_str());
-                None
+                templates::error_html("Thread not found", &theme)
             }
             Err(e) => {
                 error!("Failed to load thread {}: {}", thread_id.as_str(), e);
-                None
+                templates::error_html(&format!("Failed to load thread: {}", e), &theme)
             }
         };
 
@@ -198,7 +210,9 @@ impl OrionApp {
             view.load_thread(cx);
             view
         }));
-        self.current_view = View::Thread { html: thread_html };
+        self.current_view = View::Thread {
+            html: thread_html.clone(),
+        };
         cx.notify();
     }
 
@@ -241,29 +255,35 @@ impl OrionApp {
         cx.spawn(async move |this, cx| {
             loop {
                 // Wait 500ms between refreshes
-                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
 
                 // Check if still syncing
-                let still_syncing = cx.update(|cx| {
-                    this.update(cx, |app, cx| {
-                        if app.is_syncing {
-                            // Refresh thread list with new data
-                            if let Some(thread_list) = &app.thread_list_view {
-                                thread_list.update(cx, |view, cx| view.load_threads(cx));
+                let still_syncing = cx
+                    .update(|cx| {
+                        this.update(cx, |app, cx| {
+                            if app.is_syncing {
+                                // Refresh thread list with new data
+                                if let Some(thread_list) = &app.thread_list_view {
+                                    thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                }
+                                cx.notify();
+                                true
+                            } else {
+                                false
                             }
-                            cx.notify();
-                            true
-                        } else {
-                            false
-                        }
-                    }).unwrap_or(false)
-                }).unwrap_or(false);
+                        })
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
 
                 if !still_syncing {
                     break;
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         // Run sync on background thread (it's blocking I/O)
         let background = cx.background_executor().clone();
@@ -272,8 +292,9 @@ impl OrionApp {
             let result = background
                 .spawn(async move {
                     let options = SyncOptions {
-                        max_messages: None, // Fetch all messages
+                        max_messages: None,
                         full_resync: false,
+                        ..Default::default()
                     };
                     sync_gmail(&client, store.as_ref(), "default", options)
                 })
@@ -390,22 +411,14 @@ impl OrionApp {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        last_sync
-                                            .map(|ts| format_relative_time(ts))
-                                            .unwrap_or_else(|| "Not synced".to_string()),
-                                    ),
+                                div().text_xs().text_color(theme.muted_foreground).child(
+                                    last_sync
+                                        .map(|ts| format_relative_time(ts))
+                                        .unwrap_or_else(|| "Not synced".to_string()),
+                                ),
                             )
                             .child(
                                 Button::new("sync-button")
-                                    .icon(
-                                        Icon::new(IconName::LoaderCircle)
-                                            .with_size(Size::XSmall)
-                                            .text_color(theme.muted_foreground),
-                                    )
                                     .label(if is_syncing { "Syncing..." } else { "Sync" })
                                     .small()
                                     .ghost()
@@ -440,37 +453,36 @@ impl OrionApp {
                                     .child("U"),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .overflow_hidden()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .text_ellipsis()
-                                            .child("user@gmail.com"),
-                                    ),
+                                div().flex().flex_col().overflow_hidden().flex_1().child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.foreground)
+                                        .text_ellipsis()
+                                        .child("user@gmail.com"),
+                                ),
                             ),
                     ),
             )
     }
 
-    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         // Extract theme colors upfront before any mutable borrows
         let theme = cx.theme();
         let bg = theme.background;
         let muted_fg = theme.muted_foreground;
 
         // Extract data from current_view before any mutable borrows
-        let (is_thread_view, html_content, thread_entity) = match &self.current_view {
-            View::Inbox => (false, None, None),
-            View::Thread { html } => (true, html.clone(), self.thread_view.clone()),
+        let (html_content, thread_entity) = match &self.current_view {
+            View::Inbox => (None, None),
+            View::Thread { html } => (Some(html.clone()), self.thread_view.clone()),
         };
 
-        if !is_thread_view {
-            // Inbox view
+        // Inbox view
+        if html_content.is_none() {
             if let Some(thread_list) = &self.thread_list_view {
                 return thread_list.clone().into_any_element();
             } else {
@@ -481,41 +493,44 @@ impl OrionApp {
             }
         }
 
-        // Thread view
+        // Thread view - always use WebView
+        let html = html_content.unwrap();
         if let Some(thread) = thread_entity {
-            if let Some(html) = html_content {
-                // We have HTML content - create/update WebView
-                info!("Creating/getting WebView for HTML content");
-                let webview = self.get_or_create_webview(window, cx);
+            let webview = self.get_or_create_webview(window, cx);
 
-                // Update WebView content
-                info!("Loading HTML into WebView");
+            // Only reload HTML if content has changed (avoids re-render on scroll)
+            let needs_reload = self
+                .webview_loaded_html
+                .as_ref()
+                .map(|loaded| loaded != &html)
+                .unwrap_or(true);
+
+            if needs_reload {
+                info!("Loading HTML into WebView ({} bytes)", html.len());
                 webview.update(cx, |wv, _| {
                     let _ = wv.load_html(&html);
                     wv.show();
                 });
-
-                // Render thread header + WebView container
-                div()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .bg(bg)
-                    .child(thread) // ThreadView renders header only
-                    .child(
-                        div()
-                            .id("webview-container")
-                            .flex_1()
-                            .w_full()
-                            .min_h_0()
-                            .p_4() // Match native card padding
-                            .child(webview),
-                    )
-                    .into_any_element()
-            } else {
-                // No HTML content - ThreadView handles native rendering
-                thread.into_any_element()
+                self.webview_loaded_html = Some(html.clone());
             }
+
+            // Render thread header + WebView container
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(bg)
+                .child(thread) // ThreadView renders header only
+                .child(
+                    div()
+                        .id("webview-container")
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
+                        .p_4() // Match native card padding
+                        .child(webview),
+                )
+                .into_any_element()
         } else {
             div()
                 .text_color(muted_fg)
@@ -582,12 +597,6 @@ impl Render for OrionApp {
                     .child(sidebar),
             )
             // Main content
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(content),
-            )
+            .child(div().flex().flex_1().overflow_hidden().child(content))
     }
 }

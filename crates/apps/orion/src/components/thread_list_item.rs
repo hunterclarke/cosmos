@@ -147,13 +147,9 @@ impl RenderOnce for ThreadListItem {
                                     .when(message_count > 1, |el| {
                                         el.child(
                                             div()
-                                                .px_2()
-                                                .py_px()
-                                                .bg(theme.primary)
-                                                .rounded_md()
                                                 .text_xs()
-                                                .text_color(theme.primary_foreground)
-                                                .child(format!("{}", message_count)),
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("({})", message_count)),
                                         )
                                     }),
                             ),
