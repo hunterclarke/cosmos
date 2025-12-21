@@ -4,6 +4,7 @@ use chrono::{DateTime, Local, Utc};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::webview::WebView;
 use gpui_component::ActiveTheme;
 use log::{error, info, warn};
 use mail::{
@@ -11,6 +12,7 @@ use mail::{
     ThreadId,
 };
 use std::sync::Arc;
+use wry::WebViewBuilder;
 
 use crate::components::Sidebar;
 use crate::views::{ThreadListView, ThreadView};
@@ -19,7 +21,10 @@ use crate::views::{ThreadListView, ThreadView};
 #[derive(Clone)]
 pub enum View {
     Inbox,
-    Thread,
+    Thread {
+        /// Pre-generated HTML for the thread (generated on navigation, not during render)
+        html: Option<String>,
+    },
 }
 
 /// Root application state
@@ -37,6 +42,8 @@ pub struct OrionApp {
     labels: Vec<Label>,
     /// Currently selected label (defaults to INBOX)
     selected_label: String,
+    /// Shared WebView for HTML email rendering (created lazily)
+    webview: Option<Entity<WebView>>,
 }
 
 impl OrionApp {
@@ -72,6 +79,47 @@ impl OrionApp {
             thread_view: None,
             labels: Sidebar::default_labels(),
             selected_label: LabelId::INBOX.to_string(),
+            webview: None,
+        }
+    }
+
+    /// Get or create the shared WebView
+    fn get_or_create_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<WebView> {
+        if let Some(ref webview) = self.webview {
+            return webview.clone();
+        }
+
+        // Get theme background color for WebView
+        let theme = cx.theme();
+        let bg = theme.background.to_rgb();
+        let bg_r = (bg.r * 255.0) as u8;
+        let bg_g = (bg.g * 255.0) as u8;
+        let bg_b = (bg.b * 255.0) as u8;
+
+        // Create initial HTML with dark background
+        let initial_html = format!(
+            "<html><head><style>html,body{{margin:0;padding:0;background:rgb({},{},{});}}</style></head><body></body></html>",
+            bg_r, bg_g, bg_b
+        );
+
+        // Create a new WebView with dark background
+        let wry_webview = WebViewBuilder::new()
+            .with_html(&initial_html)
+            .with_background_color((bg_r, bg_g, bg_b, 255))
+            .build_as_child(window)
+            .expect("Failed to create WebView");
+
+        let webview_entity = cx.new(|cx| WebView::new(wry_webview, window, cx));
+        self.webview = Some(webview_entity.clone());
+        webview_entity
+    }
+
+    /// Hide the shared WebView
+    pub fn hide_webview(&self, cx: &mut Context<Self>) {
+        if let Some(ref webview) = self.webview {
+            webview.update(cx, |wv, _| {
+                wv.hide();
+            });
         }
     }
 
@@ -108,6 +156,9 @@ impl OrionApp {
             let store = self.store.clone();
             self.thread_list_view = Some(cx.new(|_| ThreadListView::new(store)));
         }
+        // Hide the WebView when not viewing a thread
+        self.hide_webview(cx);
+        // Clean up thread view
         self.thread_view = None;
         self.current_view = View::Inbox;
         cx.notify();
@@ -115,15 +166,39 @@ impl OrionApp {
 
     /// Navigate to thread view
     pub fn show_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
-        let app_handle = cx.entity().clone();
+        // Load thread data and generate HTML upfront (not during render)
         let store = self.store.clone();
+        let thread_html = match mail::get_thread_detail(store.as_ref(), &thread_id) {
+            Ok(Some(detail)) => {
+                info!(
+                    "Thread {} has {} messages",
+                    thread_id.as_str(),
+                    detail.messages.len()
+                );
+                // Always generate HTML for consistent WebView rendering
+                let theme = cx.theme();
+                let html = crate::views::generate_thread_html(&detail.messages, &theme);
+                info!("Generated HTML with {} bytes", html.len());
+                Some(html)
+            }
+            Ok(None) => {
+                warn!("Thread {} not found", thread_id.as_str());
+                None
+            }
+            Err(e) => {
+                error!("Failed to load thread {}: {}", thread_id.as_str(), e);
+                None
+            }
+        };
+
+        let app_handle = cx.entity().clone();
         self.thread_view = Some(cx.new(|cx| {
             let mut view = ThreadView::new(store, thread_id.clone());
             view.set_app(app_handle);
             view.load_thread(cx);
             view
         }));
-        self.current_view = View::Thread;
+        self.current_view = View::Thread { html: thread_html };
         cx.notify();
     }
 
@@ -131,6 +206,11 @@ impl OrionApp {
     pub fn select_label(&mut self, label_id: String, cx: &mut Context<Self>) {
         self.selected_label = label_id.clone();
         self.current_view = View::Inbox;
+
+        // Hide WebView and clean up thread view
+        self.hide_webview(cx);
+        self.thread_view = None;
+
         // Update thread list view with the new label filter
         if let Some(thread_list) = &self.thread_list_view {
             thread_list.update(cx, |view, cx| view.set_label_filter(label_id, cx));
@@ -325,30 +405,70 @@ impl OrionApp {
             }))
     }
 
-    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Extract theme colors upfront before any mutable borrows
         let theme = cx.theme();
+        let bg = theme.background;
+        let muted_fg = theme.muted_foreground;
 
-        match &self.current_view {
-            View::Inbox => {
-                if let Some(thread_list) = &self.thread_list_view {
-                    thread_list.clone().into_any_element()
-                } else {
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("Loading...")
-                        .into_any_element()
-                }
+        // Extract data from current_view before any mutable borrows
+        let (is_thread_view, html_content, thread_entity) = match &self.current_view {
+            View::Inbox => (false, None, None),
+            View::Thread { html } => (true, html.clone(), self.thread_view.clone()),
+        };
+
+        if !is_thread_view {
+            // Inbox view
+            if let Some(thread_list) = &self.thread_list_view {
+                return thread_list.clone().into_any_element();
+            } else {
+                return div()
+                    .text_color(muted_fg)
+                    .child("Loading...")
+                    .into_any_element();
             }
-            View::Thread => {
-                if let Some(thread) = &self.thread_view {
-                    thread.clone().into_any_element()
-                } else {
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("Loading thread...")
-                        .into_any_element()
-                }
+        }
+
+        // Thread view
+        if let Some(thread) = thread_entity {
+            if let Some(html) = html_content {
+                // We have HTML content - create/update WebView
+                info!("Creating/getting WebView for HTML content");
+                let webview = self.get_or_create_webview(window, cx);
+
+                // Update WebView content
+                info!("Loading HTML into WebView");
+                webview.update(cx, |wv, _| {
+                    let _ = wv.load_html(&html);
+                    wv.show();
+                });
+
+                // Render thread header + WebView container
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .bg(bg)
+                    .child(thread) // ThreadView renders header only
+                    .child(
+                        div()
+                            .id("webview-container")
+                            .flex_1()
+                            .w_full()
+                            .min_h_0()
+                            .p_4() // Match native card padding
+                            .child(webview),
+                    )
+                    .into_any_element()
+            } else {
+                // No HTML content - ThreadView handles native rendering
+                thread.into_any_element()
             }
+        } else {
+            div()
+                .text_color(muted_fg)
+                .child("Loading thread...")
+                .into_any_element()
         }
     }
 }
@@ -382,7 +502,7 @@ fn format_relative_time(ts: DateTime<Utc>) -> String {
 }
 
 impl Render for OrionApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         // Clone theme colors upfront to avoid borrow conflicts
         let bg = theme.background;
@@ -392,7 +512,7 @@ impl Render for OrionApp {
 
         let header = self.render_header(cx);
         let sidebar = self.render_sidebar(cx);
-        let content = self.render_content(cx);
+        let content = self.render_content(window, cx);
 
         div()
             .flex()

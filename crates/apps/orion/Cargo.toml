@@ -13,7 +13,8 @@ chrono = { version = "0.4.42", features = ["serde"] }
 config = { version = "0.1.0", path = "../../config" }
 env_logger = "0.11.8"
 gpui = "0.2.2"
-gpui-component = "0.5.0"
+gpui-component = { version = "0.5.0", features = ["webview"] }
 log = "0.4.29"
 mail = { version = "0.1.0", path = "../../mail" }
 tokio = { version = "1.48.0", features = ["full"] }
+wry = { version = "0.53.3", package = "lb-wry" }
