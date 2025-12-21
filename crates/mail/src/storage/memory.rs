@@ -4,7 +4,8 @@
 //! the real cosmos-storage integration is available.
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 use super::MailStore;
@@ -20,6 +21,12 @@ pub struct InMemoryMailStore {
     thread_messages: RwLock<HashMap<String, HashSet<String>>>,
     /// Sync state per account (Phase 2)
     sync_states: RwLock<HashMap<String, SyncState>>,
+    /// Sorted index: label -> set of (Reverse<timestamp_millis>, thread_id)
+    /// Using Reverse for descending order (newest first)
+    label_thread_index: RwLock<HashMap<String, BTreeSet<(Reverse<i64>, String)>>>,
+    /// Reverse index: (thread_id, label) -> timestamp_millis
+    /// Used to find and remove old entries when timestamp changes
+    thread_label_ts: RwLock<HashMap<(String, String), i64>>,
 }
 
 impl InMemoryMailStore {
@@ -30,6 +37,35 @@ impl InMemoryMailStore {
             messages: RwLock::new(HashMap::new()),
             thread_messages: RwLock::new(HashMap::new()),
             sync_states: RwLock::new(HashMap::new()),
+            label_thread_index: RwLock::new(HashMap::new()),
+            thread_label_ts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Update the label index for a thread
+    fn update_label_index(&self, thread_id: &str, labels: &[String], timestamp_millis: i64) {
+        let mut index = self.label_thread_index.write().unwrap();
+        let mut reverse = self.thread_label_ts.write().unwrap();
+
+        for label in labels {
+            let key = (thread_id.to_string(), label.clone());
+
+            // Check if we have an existing entry with a different timestamp
+            if let Some(&old_ts) = reverse.get(&key) {
+                if old_ts != timestamp_millis {
+                    // Remove old entry from sorted index
+                    if let Some(set) = index.get_mut(label) {
+                        set.remove(&(Reverse(old_ts), thread_id.to_string()));
+                    }
+                }
+            }
+
+            // Insert new entry
+            index
+                .entry(label.clone())
+                .or_default()
+                .insert((Reverse(timestamp_millis), thread_id.to_string()));
+            reverse.insert(key, timestamp_millis);
         }
     }
 }
@@ -50,13 +86,31 @@ impl MailStore for InMemoryMailStore {
     fn upsert_message(&self, message: Message) -> Result<()> {
         let thread_id = message.thread_id.0.clone();
         let msg_id = message.id.0.clone();
+        let labels = message.label_ids.clone();
+
+        // Get thread's last_message_at for index timestamp
+        let timestamp_millis = {
+            let threads = self.threads.read().unwrap();
+            threads
+                .get(&thread_id)
+                .map(|t| t.last_message_at.timestamp_millis())
+                .unwrap_or_else(|| message.received_at.timestamp_millis())
+        };
 
         let mut messages = self.messages.write().unwrap();
         messages.insert(msg_id.clone(), message);
 
         // Also link to thread
         let mut thread_messages = self.thread_messages.write().unwrap();
-        thread_messages.entry(thread_id).or_default().insert(msg_id);
+        thread_messages.entry(thread_id.clone()).or_default().insert(msg_id);
+
+        drop(messages);
+        drop(thread_messages);
+
+        // Update label index
+        if !labels.is_empty() {
+            self.update_label_index(&thread_id, &labels, timestamp_millis);
+        }
 
         Ok(())
     }
@@ -99,29 +153,21 @@ impl MailStore for InMemoryMailStore {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Thread>> {
-        let messages = self.messages.read().unwrap();
+        let index = self.label_thread_index.read().unwrap();
         let threads = self.threads.read().unwrap();
 
-        // Find all thread IDs that have at least one message with this label
-        let mut matching_thread_ids: HashSet<String> = HashSet::new();
-        for message in messages.values() {
-            if message.label_ids.contains(&label.to_string()) {
-                matching_thread_ids.insert(message.thread_id.0.clone());
-            }
-        }
+        let Some(label_set) = index.get(label) else {
+            return Ok(Vec::new());
+        };
 
-        // Get matching threads
-        let mut thread_list: Vec<_> = threads
-            .values()
-            .filter(|t| matching_thread_ids.contains(&t.id.0))
-            .cloned()
+        // BTreeSet is already sorted by (Reverse<timestamp>, thread_id)
+        // so we can just iterate, skip offset, take limit
+        let result: Vec<Thread> = label_set
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|(_, thread_id)| threads.get(thread_id).cloned())
             .collect();
-
-        // Sort by last_message_at descending
-        thread_list.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
-
-        // Apply pagination
-        let result = thread_list.into_iter().skip(offset).take(limit).collect();
 
         Ok(result)
     }
@@ -169,6 +215,8 @@ impl MailStore for InMemoryMailStore {
         self.messages.write().unwrap().clear();
         self.thread_messages.write().unwrap().clear();
         self.sync_states.write().unwrap().clear();
+        self.label_thread_index.write().unwrap().clear();
+        self.thread_label_ts.write().unwrap().clear();
         Ok(())
     }
 
@@ -200,6 +248,8 @@ impl MailStore for InMemoryMailStore {
         self.threads.write().unwrap().clear();
         self.messages.write().unwrap().clear();
         self.thread_messages.write().unwrap().clear();
+        self.label_thread_index.write().unwrap().clear();
+        self.thread_label_ts.write().unwrap().clear();
         // Note: sync_states is NOT cleared
         Ok(())
     }

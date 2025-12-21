@@ -17,6 +17,11 @@ const MESSAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("messages");
 const SYNC_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("sync_state");
 // Index: thread_id -> list of message_ids (JSON array)
 const THREAD_MESSAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("thread_messages");
+// Sorted label index: "{label}\0{inverted_timestamp}\0{thread_id}" -> ()
+// Using inverted timestamp (i64::MAX - ts) for descending order
+const LABEL_THREAD_INDEX: TableDefinition<&str, ()> = TableDefinition::new("label_thread_index");
+// Reverse index: "{thread_id}\0{label}" -> timestamp_millis (as i64 bytes)
+const THREAD_LABEL_TS: TableDefinition<&str, &[u8]> = TableDefinition::new("thread_label_ts");
 
 /// Persistent storage implementation using redb
 pub struct RedbMailStore {
@@ -54,6 +59,8 @@ impl RedbMailStore {
             let _ = write_txn.open_table(MESSAGES)?;
             let _ = write_txn.open_table(SYNC_STATE)?;
             let _ = write_txn.open_table(THREAD_MESSAGES)?;
+            let _ = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let _ = write_txn.open_table(THREAD_LABEL_TS)?;
         }
         write_txn.commit()?;
         Ok(())
@@ -95,6 +102,54 @@ impl RedbMailStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    /// Build sorted index key: "{label}\0{inverted_timestamp}\0{thread_id}"
+    fn build_label_index_key(label: &str, timestamp_millis: i64, thread_id: &str) -> String {
+        // Invert timestamp for descending order
+        let inverted = i64::MAX - timestamp_millis;
+        format!("{}\0{:020}\0{}", label, inverted, thread_id)
+    }
+
+    /// Build reverse index key: "{thread_id}\0{label}"
+    fn build_reverse_index_key(thread_id: &str, label: &str) -> String {
+        format!("{}\0{}", thread_id, label)
+    }
+
+    /// Update label index for a thread's labels
+    fn update_label_index(&self, thread_id: &str, labels: &[String], timestamp_millis: i64) -> Result<()> {
+        if labels.is_empty() {
+            return Ok(());
+        }
+
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut index_table = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let mut reverse_table = write_txn.open_table(THREAD_LABEL_TS)?;
+
+            for label in labels {
+                let reverse_key = Self::build_reverse_index_key(thread_id, label);
+
+                // Check for existing timestamp
+                if let Some(old_ts_data) = reverse_table.get(reverse_key.as_str())? {
+                    let old_ts = i64::from_be_bytes(old_ts_data.value().try_into().unwrap_or([0; 8]));
+                    if old_ts != timestamp_millis {
+                        // Remove old index entry
+                        let old_key = Self::build_label_index_key(label, old_ts, thread_id);
+                        index_table.remove(old_key.as_str())?;
+                    }
+                }
+
+                // Insert new index entry
+                let new_key = Self::build_label_index_key(label, timestamp_millis, thread_id);
+                index_table.insert(new_key.as_str(), ())?;
+
+                // Update reverse index
+                reverse_table.insert(reverse_key.as_str(), &timestamp_millis.to_be_bytes()[..])?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }
 
 impl MailStore for RedbMailStore {
@@ -112,6 +167,19 @@ impl MailStore for RedbMailStore {
     fn upsert_message(&self, message: Message) -> Result<()> {
         let thread_id = message.thread_id.as_str().to_string();
         let msg_id = message.id.as_str().to_string();
+        let labels = message.label_ids.clone();
+
+        // Get thread's last_message_at for index timestamp
+        let timestamp_millis = {
+            let read_txn = self.db.begin_read()?;
+            let threads_table = read_txn.open_table(THREADS)?;
+            if let Some(data) = threads_table.get(thread_id.as_str())? {
+                let thread: Thread = serde_json::from_slice(data.value())?;
+                thread.last_message_at.timestamp_millis()
+            } else {
+                message.received_at.timestamp_millis()
+            }
+        };
 
         let write_txn = self.db.begin_write()?;
         {
@@ -123,6 +191,9 @@ impl MailStore for RedbMailStore {
 
         // Link message to thread
         self.add_message_to_thread(&thread_id, &msg_id)?;
+
+        // Update label index
+        self.update_label_index(&thread_id, &labels, timestamp_millis)?;
 
         Ok(())
     }
@@ -185,37 +256,48 @@ impl MailStore for RedbMailStore {
         offset: usize,
     ) -> Result<Vec<Thread>> {
         let read_txn = self.db.begin_read()?;
-        let messages_table = read_txn.open_table(MESSAGES)?;
+        let index_table = read_txn.open_table(LABEL_THREAD_INDEX)?;
         let threads_table = read_txn.open_table(THREADS)?;
 
-        // Find all thread IDs that have at least one message with this label
-        let mut matching_thread_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        // Build prefix to scan for this label
+        let prefix = format!("{}\0", label);
 
-        for result in messages_table.iter()? {
-            let (_, data) = result?;
-            let message: Message = serde_json::from_slice(data.value())?;
-            if message.label_ids.contains(&label.to_string()) {
-                matching_thread_ids.insert(message.thread_id.as_str().to_string());
+        // Range scan from prefix, already sorted by inverted timestamp (descending order)
+        let mut threads = Vec::new();
+        let mut skipped = 0;
+
+        for result in index_table.range(prefix.as_str()..)? {
+            let (key, _) = result?;
+            let key_str = key.value();
+
+            // Stop if we've passed this label's entries
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+
+            // Skip offset entries
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            // Extract thread_id from key: "{label}\0{inverted_ts}\0{thread_id}"
+            let parts: Vec<&str> = key_str.splitn(3, '\0').collect();
+            if parts.len() == 3 {
+                let thread_id = parts[2];
+                if let Some(data) = threads_table.get(thread_id)? {
+                    let thread: Thread = serde_json::from_slice(data.value())?;
+                    threads.push(thread);
+                }
+            }
+
+            // Stop once we have enough
+            if threads.len() >= limit {
+                break;
             }
         }
 
-        // Get matching threads
-        let mut threads: Vec<Thread> = Vec::new();
-        for thread_id in &matching_thread_ids {
-            if let Some(data) = threads_table.get(thread_id.as_str())? {
-                let thread: Thread = serde_json::from_slice(data.value())?;
-                threads.push(thread);
-            }
-        }
-
-        // Sort by last_message_at descending
-        threads.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
-
-        // Apply pagination
-        let result = threads.into_iter().skip(offset).take(limit).collect();
-
-        Ok(result)
+        Ok(threads)
     }
 
     fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<Message>> {
@@ -263,12 +345,16 @@ impl MailStore for RedbMailStore {
             let mut messages = write_txn.open_table(MESSAGES)?;
             let mut sync_state = write_txn.open_table(SYNC_STATE)?;
             let mut thread_messages = write_txn.open_table(THREAD_MESSAGES)?;
+            let mut label_index = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let mut thread_label_ts = write_txn.open_table(THREAD_LABEL_TS)?;
 
             // Drain all entries
             while threads.pop_first()?.is_some() {}
             while messages.pop_first()?.is_some() {}
             while sync_state.pop_first()?.is_some() {}
             while thread_messages.pop_first()?.is_some() {}
+            while label_index.pop_first()?.is_some() {}
+            while thread_label_ts.pop_first()?.is_some() {}
         }
         write_txn.commit()?;
         Ok(())
@@ -323,10 +409,14 @@ impl MailStore for RedbMailStore {
             let mut threads = write_txn.open_table(THREADS)?;
             let mut messages = write_txn.open_table(MESSAGES)?;
             let mut thread_messages = write_txn.open_table(THREAD_MESSAGES)?;
+            let mut label_index = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let mut thread_label_ts = write_txn.open_table(THREAD_LABEL_TS)?;
 
             while threads.pop_first()?.is_some() {}
             while messages.pop_first()?.is_some() {}
             while thread_messages.pop_first()?.is_some() {}
+            while label_index.pop_first()?.is_some() {}
+            while thread_label_ts.pop_first()?.is_some() {}
         }
         write_txn.commit()?;
         Ok(())
