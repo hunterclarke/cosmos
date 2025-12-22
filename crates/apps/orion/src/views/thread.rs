@@ -4,6 +4,8 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize};
+
+use crate::assets::icons::{Archive, MailOpen};
 use mail::{MailStore, ThreadDetail, ThreadId, get_thread_detail};
 use std::sync::Arc;
 
@@ -134,25 +136,61 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .gap_1()
+                    // Archive button
                     .child(
-                        Button::new("reply-button")
+                        Button::new("archive-button")
                             .icon(
-                                Icon::new(IconName::ArrowLeft)
+                                Icon::new(Archive)
                                     .with_size(ComponentSize::Small)
                                     .text_color(theme.muted_foreground),
                             )
                             .ghost()
-                            .label("Reply"),
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _event, _window, cx| {
+                                if let Some(app) = &view.app {
+                                    app.update(cx, |app, cx| {
+                                        app.archive_current_thread(cx);
+                                    });
+                                }
+                            })),
                     )
+                    // Star button
                     .child(
-                        Button::new("archive-button")
+                        Button::new("star-button")
                             .icon(
-                                Icon::new(IconName::Folder)
+                                Icon::new(IconName::Star)
                                     .with_size(ComponentSize::Small)
                                     .text_color(theme.muted_foreground),
                             )
-                            .ghost(),
+                            .ghost()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _event, _window, cx| {
+                                if let Some(app) = &view.app {
+                                    app.update(cx, |app, cx| {
+                                        app.toggle_star_current_thread(cx);
+                                    });
+                                }
+                            })),
                     )
+                    // Read/Unread button
+                    .child(
+                        Button::new("read-button")
+                            .icon(
+                                Icon::new(MailOpen)
+                                    .with_size(ComponentSize::Small)
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .ghost()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _event, _window, cx| {
+                                if let Some(app) = &view.app {
+                                    app.update(cx, |app, cx| {
+                                        app.toggle_read_current_thread(cx);
+                                    });
+                                }
+                            })),
+                    )
+                    // Delete/Trash button
                     .child(
                         Button::new("delete-button")
                             .icon(
@@ -160,7 +198,15 @@ impl ThreadView {
                                     .with_size(ComponentSize::Small)
                                     .text_color(theme.muted_foreground),
                             )
-                            .ghost(),
+                            .ghost()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|view, _event, _window, cx| {
+                                if let Some(app) = &view.app {
+                                    app.update(cx, |app, cx| {
+                                        app.trash_current_thread(cx);
+                                    });
+                                }
+                            })),
                     ),
             )
     }

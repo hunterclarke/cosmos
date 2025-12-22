@@ -11,11 +11,13 @@ use log::{debug, error, info, warn};
 use mail::GmailCredentials;
 
 mod app;
+mod assets;
 mod components;
 mod templates;
 mod views;
 
 use app::{FocusSearch, OrionApp};
+use assets::OrionAssets;
 use components::search_box;
 use views::search_results;
 
@@ -36,7 +38,7 @@ fn main() {
     debug!("[BOOT] Config init: {:?}", startup_start.elapsed());
 
     Application::new()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(OrionAssets)
         .run(move |cx| {
         debug!("[BOOT] GPUI Application created: {:?}", startup_start.elapsed());
 

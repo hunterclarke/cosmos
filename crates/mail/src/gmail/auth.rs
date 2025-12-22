@@ -41,8 +41,8 @@ impl GmailAuth {
     const AUTH_URL: &'static str = "https://accounts.google.com/o/oauth2/v2/auth";
     const TOKEN_URL: &'static str = "https://oauth2.googleapis.com/token";
 
-    /// Required scope for read-only Gmail access
-    const GMAIL_READONLY_SCOPE: &'static str = "https://www.googleapis.com/auth/gmail.readonly";
+    /// Required scope for Gmail access (modify allows read + label changes)
+    const GMAIL_MODIFY_SCOPE: &'static str = "https://www.googleapis.com/auth/gmail.modify";
 
     /// Port range to try for local OAuth callback server
     const PORT_RANGE_START: u16 = 8080;
@@ -107,7 +107,7 @@ impl GmailAuth {
             Self::AUTH_URL,
             urlencoding::encode(&self.client_id),
             urlencoding::encode(&redirect_uri),
-            urlencoding::encode(Self::GMAIL_READONLY_SCOPE),
+            urlencoding::encode(Self::GMAIL_MODIFY_SCOPE),
         );
 
         println!("\n=== Gmail Authentication Required ===");

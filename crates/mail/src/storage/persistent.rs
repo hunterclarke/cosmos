@@ -431,6 +431,106 @@ impl MailStore for RedbMailStore {
         write_txn.commit()?;
         Ok(())
     }
+
+    // === Phase 3: Mutation Support Methods ===
+
+    fn get_message_ids_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageId>> {
+        let msg_ids = self.get_thread_message_ids(thread_id.as_str())?;
+        Ok(msg_ids.into_iter().map(|s| MessageId::new(&s)).collect())
+    }
+
+    fn update_message_labels(&self, message_id: &MessageId, label_ids: Vec<String>) -> Result<()> {
+        // Read existing message
+        let read_txn = self.db.begin_read()?;
+        let messages_table = read_txn.open_table(MESSAGES)?;
+        let Some(data) = messages_table.get(message_id.as_str())? else {
+            return Ok(()); // Message not found
+        };
+
+        let mut message: Message = serde_json::from_slice(data.value())?;
+        let old_labels = message.label_ids.clone();
+        let was_unread = old_labels.contains(&"UNREAD".to_string());
+        let is_unread = label_ids.contains(&"UNREAD".to_string());
+
+        let thread_id = message.thread_id.as_str().to_string();
+        let timestamp = message.received_at.timestamp_millis();
+
+        drop(messages_table);
+        drop(read_txn);
+
+        // Update message labels
+        message.label_ids = label_ids.clone();
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut messages_table = write_txn.open_table(MESSAGES)?;
+            let data = serde_json::to_vec(&message)?;
+            messages_table.insert(message_id.as_str(), data.as_slice())?;
+
+            let mut index_table = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let mut reverse_table = write_txn.open_table(THREAD_LABEL_TS)?;
+
+            // Remove old labels that are no longer present
+            for label in &old_labels {
+                if !label_ids.contains(label) {
+                    let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+                    if let Some(old_ts_data) = reverse_table.get(reverse_key.as_str())? {
+                        let old_ts = i64::from_be_bytes(old_ts_data.value().try_into().unwrap_or([0; 8]));
+                        let old_index_key = Self::build_label_index_key(label, old_ts, &thread_id);
+                        index_table.remove(old_index_key.as_str())?;
+                    }
+                    reverse_table.remove(reverse_key.as_str())?;
+                }
+            }
+
+            // Add new labels that weren't present before
+            for label in &label_ids {
+                if !old_labels.contains(label) {
+                    let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+                    let index_key = Self::build_label_index_key(label, timestamp, &thread_id);
+                    index_table.insert(index_key.as_str(), ())?;
+                    reverse_table.insert(reverse_key.as_str(), &timestamp.to_be_bytes()[..])?;
+                }
+            }
+        }
+        write_txn.commit()?;
+
+        // Update thread is_unread flag if UNREAD status changed
+        if was_unread != is_unread {
+            let read_txn = self.db.begin_read()?;
+            let threads_table = read_txn.open_table(THREADS)?;
+            if let Some(data) = threads_table.get(thread_id.as_str())? {
+                let mut thread: Thread = serde_json::from_slice(data.value())?;
+
+                // Check if any message in thread is still unread
+                let messages_table = read_txn.open_table(MESSAGES)?;
+                let msg_ids = self.get_thread_message_ids(&thread_id)?;
+                let any_unread = msg_ids.iter().any(|id| {
+                    messages_table
+                        .get(id.as_str())
+                        .ok()
+                        .flatten()
+                        .and_then(|data| serde_json::from_slice::<Message>(data.value()).ok())
+                        .map(|m| m.label_ids.contains(&"UNREAD".to_string()))
+                        .unwrap_or(false)
+                });
+
+                drop(messages_table);
+                drop(threads_table);
+                drop(read_txn);
+
+                thread.is_unread = any_unread;
+                let write_txn = self.db.begin_write()?;
+                {
+                    let mut threads_table = write_txn.open_table(THREADS)?;
+                    let data = serde_json::to_vec(&thread)?;
+                    threads_table.insert(thread_id.as_str(), data.as_slice())?;
+                }
+                write_txn.commit()?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

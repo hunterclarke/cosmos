@@ -13,9 +13,39 @@ pub use auth::GmailAuth;
 pub use client::{GmailClient, HistoryExpiredError};
 pub use normalize::normalize_message;
 
-/// Gmail API response types
+/// Gmail API request and response types
 pub mod api {
     use serde::{Deserialize, Serialize};
+
+    // === Mutation Request Types ===
+
+    /// Request body for modifying message labels
+    /// POST /gmail/v1/users/me/messages/{id}/modify
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ModifyMessageRequest {
+        /// Label IDs to add
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub add_label_ids: Vec<String>,
+        /// Label IDs to remove
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub remove_label_ids: Vec<String>,
+    }
+
+    /// Request body for batch modifying messages
+    /// POST /gmail/v1/users/me/messages/batchModify
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BatchModifyRequest {
+        /// Message IDs to modify
+        pub ids: Vec<String>,
+        /// Label IDs to add
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub add_label_ids: Vec<String>,
+        /// Label IDs to remove
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub remove_label_ids: Vec<String>,
+    }
 
     /// Response from listing messages
     #[derive(Debug, Deserialize)]

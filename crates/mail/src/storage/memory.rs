@@ -253,6 +253,92 @@ impl MailStore for InMemoryMailStore {
         // Note: sync_states is NOT cleared
         Ok(())
     }
+
+    // === Phase 3: Mutation Support Methods ===
+
+    fn get_message_ids_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageId>> {
+        let thread_messages = self.thread_messages.read().unwrap();
+        let ids = thread_messages
+            .get(&thread_id.0)
+            .map(|set| set.iter().map(|s| MessageId::new(s)).collect())
+            .unwrap_or_default();
+        Ok(ids)
+    }
+
+    fn update_message_labels(&self, message_id: &MessageId, label_ids: Vec<String>) -> Result<()> {
+        let mut messages = self.messages.write().unwrap();
+
+        if let Some(message) = messages.get_mut(&message_id.0) {
+            let old_labels = message.label_ids.clone();
+            let was_unread = old_labels.contains(&"UNREAD".to_string());
+            let is_unread = label_ids.contains(&"UNREAD".to_string());
+
+            // Update message labels
+            message.label_ids = label_ids.clone();
+
+            // Get thread ID before dropping borrow
+            let thread_id = message.thread_id.0.clone();
+            let timestamp = message.received_at.timestamp_millis();
+
+            drop(messages);
+
+            // Update label index - remove old labels, add new ones
+            {
+                let mut index = self.label_thread_index.write().unwrap();
+                let mut reverse = self.thread_label_ts.write().unwrap();
+
+                // Remove entries for old labels that are no longer present
+                for label in &old_labels {
+                    if !label_ids.contains(label) {
+                        let key = (thread_id.clone(), label.clone());
+                        if let Some(&old_ts) = reverse.get(&key) {
+                            if let Some(set) = index.get_mut(label) {
+                                set.remove(&(Reverse(old_ts), thread_id.clone()));
+                            }
+                        }
+                        reverse.remove(&key);
+                    }
+                }
+
+                // Add entries for new labels
+                for label in &label_ids {
+                    if !old_labels.contains(label) {
+                        index
+                            .entry(label.clone())
+                            .or_default()
+                            .insert((Reverse(timestamp), thread_id.clone()));
+                        reverse.insert((thread_id.clone(), label.clone()), timestamp);
+                    }
+                }
+            }
+
+            // Update thread is_unread flag if UNREAD status changed
+            if was_unread != is_unread {
+                let mut threads = self.threads.write().unwrap();
+                if let Some(thread) = threads.get_mut(&thread_id) {
+                    // Check if any message in thread is still unread
+                    let messages = self.messages.read().unwrap();
+                    let thread_messages = self.thread_messages.read().unwrap();
+
+                    let any_unread = thread_messages
+                        .get(&thread_id)
+                        .map(|msg_ids| {
+                            msg_ids.iter().any(|id| {
+                                messages
+                                    .get(id)
+                                    .map(|m| m.label_ids.contains(&"UNREAD".to_string()))
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+
+                    thread.is_unread = any_unread;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
