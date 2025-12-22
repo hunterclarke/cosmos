@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize};
-use mail::{get_thread_detail, MailStore, ThreadDetail, ThreadId};
+use mail::{MailStore, ThreadDetail, ThreadId, get_thread_detail};
 use std::sync::Arc;
 
 use crate::app::OrionApp;
@@ -164,7 +164,6 @@ impl ThreadView {
                     ),
             )
     }
-
 }
 
 impl Render for ThreadView {
