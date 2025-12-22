@@ -339,6 +339,63 @@ impl MailStore for InMemoryMailStore {
 
         Ok(())
     }
+
+    fn delete_message(&self, message_id: &MessageId) -> Result<()> {
+        let mut messages = self.messages.write().unwrap();
+
+        // Get the message to find its thread and labels
+        let message = match messages.remove(&message_id.0) {
+            Some(m) => m,
+            None => return Ok(()), // Already deleted, nothing to do
+        };
+
+        let thread_id = message.thread_id.0.clone();
+
+        // Remove from thread_messages index
+        {
+            let mut thread_messages = self.thread_messages.write().unwrap();
+            if let Some(set) = thread_messages.get_mut(&thread_id) {
+                set.remove(&message_id.0);
+            }
+        }
+
+        // Remove from label index
+        {
+            let mut index = self.label_thread_index.write().unwrap();
+            let mut reverse = self.thread_label_ts.write().unwrap();
+
+            for label in &message.label_ids {
+                let key = (thread_id.clone(), label.clone());
+                if let Some(&ts) = reverse.get(&key) {
+                    if let Some(set) = index.get_mut(label) {
+                        set.remove(&(Reverse(ts), thread_id.clone()));
+                    }
+                }
+                reverse.remove(&key);
+            }
+        }
+
+        drop(messages);
+
+        // Update thread message count, or delete thread if empty
+        let mut threads = self.threads.write().unwrap();
+        let thread_messages = self.thread_messages.read().unwrap();
+
+        let remaining_count = thread_messages
+            .get(&thread_id)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        if remaining_count == 0 {
+            // Delete the thread entirely
+            threads.remove(&thread_id);
+        } else if let Some(thread) = threads.get_mut(&thread_id) {
+            // Update message count
+            thread.message_count = remaining_count;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

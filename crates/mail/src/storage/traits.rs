@@ -79,4 +79,10 @@ pub trait MailStore: Send + Sync {
     /// Replaces the entire label_ids array on the message.
     /// Also updates thread-level is_unread flag if UNREAD label changes.
     fn update_message_labels(&self, message_id: &MessageId, label_ids: Vec<String>) -> Result<()>;
+
+    /// Delete a message by ID
+    ///
+    /// Also updates the thread's message_count. If this was the last message
+    /// in the thread, the thread is also deleted.
+    fn delete_message(&self, message_id: &MessageId) -> Result<()>;
 }

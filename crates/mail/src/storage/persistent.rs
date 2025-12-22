@@ -531,6 +531,97 @@ impl MailStore for RedbMailStore {
 
         Ok(())
     }
+
+    fn delete_message(&self, message_id: &MessageId) -> Result<()> {
+        // Read message first to get thread ID and labels
+        let read_txn = self.db.begin_read()?;
+        let messages_table = read_txn.open_table(MESSAGES)?;
+        let Some(data) = messages_table.get(message_id.as_str())? else {
+            return Ok(()); // Already deleted, nothing to do
+        };
+
+        let message: Message = serde_json::from_slice(data.value())?;
+        let thread_id = message.thread_id.as_str().to_string();
+        let labels = message.label_ids.clone();
+
+        drop(messages_table);
+        drop(read_txn);
+
+        // Delete message and update indexes in a single transaction
+        let write_txn = self.db.begin_write()?;
+        {
+            // Remove from messages table
+            let mut messages_table = write_txn.open_table(MESSAGES)?;
+            messages_table.remove(message_id.as_str())?;
+
+            // Remove from thread_messages
+            let mut thread_messages = write_txn.open_table(THREAD_MESSAGES)?;
+            let updated_msg_ids: Option<Vec<String>> = {
+                if let Some(existing) = thread_messages.get(thread_id.as_str())? {
+                    let mut msg_ids: Vec<String> = serde_json::from_slice(existing.value())?;
+                    msg_ids.retain(|id| id != message_id.as_str());
+                    Some(msg_ids)
+                } else {
+                    None
+                }
+            };
+            if let Some(msg_ids) = updated_msg_ids {
+                if msg_ids.is_empty() {
+                    thread_messages.remove(thread_id.as_str())?;
+                } else {
+                    let data = serde_json::to_vec(&msg_ids)?;
+                    thread_messages.insert(thread_id.as_str(), data.as_slice())?;
+                }
+            }
+
+            // Remove from label indexes
+            let mut index_table = write_txn.open_table(LABEL_THREAD_INDEX)?;
+            let mut reverse_table = write_txn.open_table(THREAD_LABEL_TS)?;
+
+            for label in &labels {
+                let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+                if let Some(ts_data) = reverse_table.get(reverse_key.as_str())? {
+                    let ts = i64::from_be_bytes(ts_data.value().try_into().unwrap_or([0; 8]));
+                    let index_key = Self::build_label_index_key(label, ts, &thread_id);
+                    index_table.remove(index_key.as_str())?;
+                }
+                reverse_table.remove(reverse_key.as_str())?;
+            }
+
+            // Update or delete thread
+            let mut threads_table = write_txn.open_table(THREADS)?;
+            let remaining_count = {
+                let remaining_msgs = thread_messages.get(thread_id.as_str())?;
+                remaining_msgs
+                    .map(|data| serde_json::from_slice::<Vec<String>>(data.value()).ok())
+                    .flatten()
+                    .map(|v| v.len())
+                    .unwrap_or(0)
+            };
+
+            if remaining_count == 0 {
+                // Delete thread entirely
+                threads_table.remove(thread_id.as_str())?;
+            } else {
+                // Update message count - read then write to avoid borrow conflicts
+                let updated_thread: Option<Vec<u8>> = {
+                    if let Some(data) = threads_table.get(thread_id.as_str())? {
+                        let mut thread: Thread = serde_json::from_slice(data.value())?;
+                        thread.message_count = remaining_count;
+                        Some(serde_json::to_vec(&thread)?)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(updated_data) = updated_thread {
+                    threads_table.insert(thread_id.as_str(), updated_data.as_slice())?;
+                }
+            }
+        }
+        write_txn.commit()?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

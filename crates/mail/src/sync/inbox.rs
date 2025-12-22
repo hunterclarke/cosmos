@@ -119,6 +119,9 @@ pub fn sync_gmail(
 ///
 /// Fetches and stores messages in batches for incremental progress.
 /// Resumable: saves partial sync state and skips already-fetched messages.
+///
+/// After completing the full sync, runs an incremental catch-up sync
+/// to fetch any messages that arrived during the sync.
 fn initial_sync(
     gmail: &GmailClient,
     store: &dyn MailStore,
@@ -130,11 +133,26 @@ fn initial_sync(
         ..Default::default()
     };
 
-    // Save partial sync state to indicate initial sync is in progress
-    // This allows resuming if the app is closed mid-sync
-    let partial_state = SyncState::partial(account_id);
-    store.save_sync_state(partial_state)?;
-    info!("Starting initial sync (resumable)...");
+    // Check if we're resuming an incomplete sync (already have history_id)
+    // or starting fresh (need to capture history_id now)
+    let existing_state = store.get_sync_state(account_id)?;
+    let start_history_id = match existing_state {
+        Some(state) if !state.initial_sync_complete && !state.history_id.is_empty() => {
+            info!("Resuming initial sync from history_id: {}", state.history_id);
+            state.history_id
+        }
+        _ => {
+            // Get history_id at START of sync so we can catch up on any
+            // messages that arrive during the sync
+            let history_id = get_current_history_id(gmail)?;
+            info!("Starting initial sync from history_id: {}", history_id);
+
+            // Save partial sync state to indicate initial sync is in progress
+            let partial_state = SyncState::partial(account_id, &history_id);
+            store.save_sync_state(partial_state)?;
+            history_id
+        }
+    };
 
     let mut page_token: Option<String> = None;
     let mut total_listed = 0usize;
@@ -252,20 +270,10 @@ fn initial_sync(
         }
     }
 
-    // Mark initial sync as complete with history_id for future incremental syncs
-    match get_current_history_id(gmail) {
-        Ok(history_id) => {
-            let complete_state = SyncState::new(account_id, &history_id);
-            store.save_sync_state(complete_state)?;
-            info!("Initial sync complete, saved history_id for incremental sync");
-        }
-        Err(e) => {
-            warn!("Could not get history_id, incremental sync may not work: {}", e);
-            // Still mark as complete so we don't keep retrying
-            let complete_state = SyncState::new(account_id, "");
-            store.save_sync_state(complete_state)?;
-        }
-    }
+    // Mark initial sync as complete with the history_id we captured at the start
+    let partial_state = SyncState::partial(account_id, &start_history_id);
+    let complete_state = partial_state.mark_complete();
+    store.save_sync_state(complete_state.clone())?;
 
     info!(
         "Initial sync complete: {} messages fetched, {} created, {} skipped",
@@ -274,30 +282,37 @@ fn initial_sync(
         stats.messages_skipped
     );
 
+    // Run incremental catch-up sync to get any messages that arrived during initial sync
+    info!("Running catch-up sync for messages received during initial sync...");
+    match incremental_sync(gmail, store, account_id, &complete_state, options) {
+        Ok(catchup_stats) => {
+            info!(
+                "Catch-up sync complete: {} new messages, {} label updates",
+                catchup_stats.messages_created,
+                catchup_stats.labels_updated
+            );
+            // Merge catch-up stats into main stats
+            stats.messages_fetched += catchup_stats.messages_fetched;
+            stats.messages_created += catchup_stats.messages_created;
+            stats.messages_updated += catchup_stats.messages_updated;
+            stats.labels_updated += catchup_stats.labels_updated;
+            stats.threads_created += catchup_stats.threads_created;
+            stats.threads_updated += catchup_stats.threads_updated;
+            stats.errors += catchup_stats.errors;
+        }
+        Err(e) => {
+            // Catch-up sync is best-effort; log but don't fail the whole sync
+            warn!("Catch-up sync failed (non-fatal): {}", e);
+        }
+    }
+
     Ok(stats)
 }
 
 /// Get the current history ID from Gmail
 fn get_current_history_id(gmail: &GmailClient) -> Result<String> {
-    // The messages.list endpoint doesn't return historyId directly
-    // We can get it from the user profile
-    // For now, we'll use a workaround: fetch the first message and use its internal_date
-    // as a rough proxy, or make a profile call
-
-    // Actually, the proper way is to call the profile endpoint
-    // But for simplicity, we'll fetch one message to bootstrap
-    let list = gmail.list_messages(1, None)?;
-    if let Some(msgs) = list.messages
-        && let Some(first) = msgs.first()
-    {
-        // Use the message ID as a baseline - not ideal but works
-        // In a production system, you'd call GET /users/me/profile
-        // which returns historyId
-        return Ok(first.id.clone());
-    }
-
-    // Fallback: use current timestamp as a marker
-    Ok(Utc::now().timestamp_millis().to_string())
+    let profile = gmail.get_profile()?;
+    Ok(profile.history_id)
 }
 
 /// Perform incremental sync using History API
@@ -333,6 +348,19 @@ fn incremental_sync(
                     if !store.has_message(&msg_id)? {
                         message_ids_to_fetch.push(msg_id);
                     }
+                }
+            }
+
+            // Handle deleted messages
+            if let Some(deleted) = &record.messages_deleted {
+                for msg_deleted in deleted {
+                    let msg_id = MessageId::new(&msg_deleted.message.id);
+                    // Get thread ID before deletion for potential thread update
+                    if let Some(msg) = store.get_message(&msg_id)? {
+                        threads_to_update.insert(msg.thread_id.clone());
+                    }
+                    store.delete_message(&msg_id)?;
+                    stats.messages_updated += 1; // Count deletions as updates
                 }
             }
 

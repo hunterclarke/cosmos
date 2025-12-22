@@ -475,6 +475,67 @@ impl MailStore for HeedMailStore {
         wtxn.commit()?;
         Ok(())
     }
+
+    fn delete_message(&self, message_id: &MessageId) -> Result<()> {
+        // Use a single write transaction for the entire operation
+        let mut wtxn = self.env.write_txn()?;
+
+        // Read message first to get thread ID and labels
+        let Some(data) = self.messages.get(&wtxn, message_id.as_str())? else {
+            return Ok(()); // Already deleted, nothing to do
+        };
+
+        let message: Message = serde_json::from_slice(data)?;
+        let thread_id = message.thread_id.as_str().to_string();
+        let labels = message.label_ids.clone();
+
+        // Remove from messages table
+        self.messages.delete(&mut wtxn, message_id.as_str())?;
+
+        // Remove from thread_messages
+        if let Some(data) = self.thread_messages.get(&wtxn, &thread_id)? {
+            let mut msg_ids: Vec<String> = serde_json::from_slice(data)?;
+            msg_ids.retain(|id| id != message_id.as_str());
+            if msg_ids.is_empty() {
+                self.thread_messages.delete(&mut wtxn, &thread_id)?;
+            } else {
+                let data = serde_json::to_vec(&msg_ids)?;
+                self.thread_messages.put(&mut wtxn, &thread_id, &data)?;
+            }
+        }
+
+        // Remove from label indexes
+        for label in &labels {
+            let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+            if let Some(ts) = self.thread_label_ts.get(&wtxn, &reverse_key)? {
+                let index_key = Self::build_label_index_key(label, ts as i64, &thread_id);
+                self.label_thread_index.delete(&mut wtxn, &index_key)?;
+            }
+            self.thread_label_ts.delete(&mut wtxn, &reverse_key)?;
+        }
+
+        // Update or delete thread
+        let remaining_count = self
+            .thread_messages
+            .get(&wtxn, &thread_id)?
+            .and_then(|data| serde_json::from_slice::<Vec<String>>(data).ok())
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        if remaining_count == 0 {
+            // Delete thread entirely
+            self.threads.delete(&mut wtxn, &thread_id)?;
+        } else if let Some(data) = self.threads.get(&wtxn, &thread_id)? {
+            // Update message count
+            let mut thread: Thread = serde_json::from_slice(data)?;
+            thread.message_count = remaining_count;
+            let updated_data = serde_json::to_vec(&thread)?;
+            self.threads.put(&mut wtxn, &thread_id, &updated_data)?;
+        }
+
+        wtxn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

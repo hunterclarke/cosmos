@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use super::api::{
     BatchModifyRequest, GmailMessage, HistoryResponse, ListLabelsResponse, ListMessagesResponse,
-    ModifyMessageRequest,
+    ModifyMessageRequest, ProfileResponse,
 };
 use super::GmailAuth;
 use crate::models::MessageId;
@@ -54,6 +54,8 @@ impl GmailClient {
     /// * `max_results` - Maximum number of messages to return per page (1-500)
     /// * `page_token` - Optional page token for pagination
     /// * `label_id` - Optional label ID to filter by (e.g., "INBOX")
+    ///
+    /// Note: This includes TRASH and SPAM for full Gmail parity.
     pub fn list_messages_with_label(
         &self,
         max_results: usize,
@@ -62,8 +64,9 @@ impl GmailClient {
     ) -> Result<ListMessagesResponse> {
         let access_token = self.auth.get_access_token()?;
 
+        // Include spam and trash for full Gmail parity
         let mut url = format!(
-            "{}/users/me/messages?maxResults={}",
+            "{}/users/me/messages?maxResults={}&includeSpamTrash=true",
             Self::BASE_URL,
             max_results.min(500)
         );
@@ -367,8 +370,8 @@ impl GmailClient {
                     .context("Failed to parse history response")?;
                 Ok(history)
             }
-            Err(ureq::Error::StatusCode(404)) => {
-                // History ID expired or invalid
+            Err(ureq::Error::StatusCode(404)) | Err(ureq::Error::StatusCode(400)) => {
+                // History ID expired, invalid, or malformed - triggers full resync
                 Err(HistoryExpiredError.into())
             }
             Err(e) => Err(anyhow::anyhow!("Failed to fetch history: {}", e)),
@@ -412,6 +415,30 @@ impl GmailClient {
             },
             next_page_token: None,
         })
+    }
+
+    // === Profile Methods ===
+
+    /// Get the user's Gmail profile
+    ///
+    /// Returns profile information including the current history ID,
+    /// which is needed for incremental sync.
+    pub fn get_profile(&self) -> Result<ProfileResponse> {
+        let access_token = self.auth.get_access_token()?;
+
+        let url = format!("{}/users/me/profile", Self::BASE_URL);
+
+        let mut response = ureq::get(&url)
+            .header("Authorization", &format!("Bearer {}", access_token))
+            .call()
+            .context("Failed to get Gmail profile")?;
+
+        let profile: ProfileResponse = response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse profile response")?;
+
+        Ok(profile)
     }
 
     // === Message Mutation Methods ===

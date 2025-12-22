@@ -39,19 +39,24 @@ impl SyncState {
     }
 
     /// Create a partial SyncState during initial sync (for resumability)
-    pub fn partial(account_id: impl Into<String>) -> Self {
+    ///
+    /// The history_id should be captured at the START of initial sync,
+    /// so we can run incremental sync after to catch up on any messages
+    /// that arrived during the sync.
+    pub fn partial(account_id: impl Into<String>, history_id: impl Into<String>) -> Self {
         Self {
             account_id: account_id.into(),
-            history_id: String::new(),
+            history_id: history_id.into(),
             last_sync_at: Utc::now(),
             sync_version: 1,
             initial_sync_complete: false,
         }
     }
 
-    /// Mark initial sync as complete with the given history_id
-    pub fn mark_complete(mut self, history_id: impl Into<String>) -> Self {
-        self.history_id = history_id.into();
+    /// Mark initial sync as complete
+    ///
+    /// Uses the history_id already stored in the partial state.
+    pub fn mark_complete(mut self) -> Self {
         self.last_sync_at = Utc::now();
         self.initial_sync_complete = true;
         self

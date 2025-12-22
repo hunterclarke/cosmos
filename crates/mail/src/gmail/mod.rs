@@ -164,6 +164,22 @@ pub mod api {
         pub label_ids: Vec<String>,
     }
 
+    // === Profile API Types ===
+
+    /// Response from Gmail Profile API (GET /users/me/profile)
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ProfileResponse {
+        /// The user's email address
+        pub email_address: String,
+        /// Total number of messages in the mailbox
+        pub messages_total: Option<u32>,
+        /// Total number of threads in the mailbox
+        pub threads_total: Option<u32>,
+        /// The current history ID for incremental sync
+        pub history_id: String,
+    }
+
     // === Labels API Types ===
 
     /// Response from Gmail Labels API

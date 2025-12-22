@@ -93,6 +93,8 @@ pub struct OrionApp {
     pending_g_sequence: bool,
     /// The list context from which the current thread was opened
     thread_list_context: ListContext,
+    /// Profile email address (fetched from Gmail)
+    profile_email: Option<String>,
 }
 
 impl OrionApp {
@@ -131,6 +133,7 @@ impl OrionApp {
             show_shortcuts_help: false,
             pending_g_sequence: false,
             thread_list_context: ListContext::Inbox,
+            profile_email: None,
         }
     }
 
@@ -577,6 +580,31 @@ impl OrionApp {
         Ok(())
     }
 
+    /// Fetch Gmail profile (email address) in the background
+    pub fn fetch_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.gmail_client.clone() else {
+            return;
+        };
+
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = background
+                .spawn(async move { client.get_profile() })
+                .await;
+
+            if let Ok(profile) = result {
+                cx.update(|cx| {
+                    this.update(cx, |app, cx| {
+                        app.profile_email = Some(profile.email_address);
+                        cx.notify();
+                    })
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// Navigate to thread list view
     pub fn show_inbox(&mut self, cx: &mut Context<Self>) {
         if self.thread_list_view.is_none() {
@@ -890,7 +918,14 @@ impl OrionApp {
                             ),
                     )
                     // Profile row
-                    .child(
+                    .child({
+                        let email = self.profile_email.clone().unwrap_or_else(|| "...".to_string());
+                        let avatar_letter = email
+                            .chars()
+                            .next()
+                            .map(|c| c.to_uppercase().to_string())
+                            .unwrap_or_else(|| "?".to_string());
+
                         div()
                             .px_3()
                             .py_2()
@@ -910,7 +945,7 @@ impl OrionApp {
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.primary_foreground)
-                                    .child("U"),
+                                    .child(avatar_letter),
                             )
                             .child(
                                 div().flex().flex_col().overflow_hidden().flex_1().child(
@@ -918,10 +953,10 @@ impl OrionApp {
                                         .text_sm()
                                         .text_color(theme.foreground)
                                         .text_ellipsis()
-                                        .child("user@gmail.com"),
+                                        .child(email),
                                 ),
-                            ),
-                    ),
+                            )
+                    }),
             )
     }
 

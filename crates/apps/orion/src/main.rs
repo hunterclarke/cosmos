@@ -105,6 +105,9 @@ fn main() {
                 // UI will show skeleton loading state until this completes
                 app.load_persistent_storage(cx);
                 debug!("[BOOT] Background storage load started: {:?}", startup_start.elapsed());
+
+                // Fetch profile email in background
+                app.fetch_profile(cx);
             });
 
             // Wrap in gpui-component Root (required for Input component)
