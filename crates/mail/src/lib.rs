@@ -6,10 +6,12 @@
 //! - Storage trait abstractions
 //! - Idempotent sync engine
 //! - Query API for UI consumption
+//! - Action handlers for mutations (archive, star, read/unread)
 //!
 //! This crate has zero UI dependencies and is designed to be UniFFI-ready
 //! for future mobile support.
 
+pub mod actions;
 pub mod config;
 pub mod gmail;
 pub mod models;
@@ -18,6 +20,7 @@ pub mod search;
 pub mod storage;
 pub mod sync;
 
+pub use actions::ActionHandler;
 pub use config::GmailCredentials;
 pub use gmail::{GmailAuth, GmailClient, HistoryExpiredError};
 pub use models::{label_icon, label_sort_order, EmailAddress, Label, LabelId, Message, MessageId, SyncState, Thread, ThreadId};

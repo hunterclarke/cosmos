@@ -391,6 +391,90 @@ impl MailStore for HeedMailStore {
         wtxn.commit()?;
         Ok(())
     }
+
+    // === Phase 3: Mutation Support Methods ===
+
+    fn get_message_ids_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageId>> {
+        let msg_ids = self.get_thread_message_ids(thread_id.as_str())?;
+        Ok(msg_ids.into_iter().map(|s| MessageId::new(&s)).collect())
+    }
+
+    fn update_message_labels(&self, message_id: &MessageId, label_ids: Vec<String>) -> Result<()> {
+        // Use a single write transaction for the entire operation to avoid
+        // nested transaction issues (MDB_BAD_RSLOT) when called from background threads
+        let mut wtxn = self.env.write_txn()?;
+
+        // Read existing message
+        let Some(data) = self.messages.get(&wtxn, message_id.as_str())? else {
+            return Ok(()); // Message not found, nothing to update
+        };
+
+        let mut message: Message = serde_json::from_slice(data)?;
+        let old_labels = message.label_ids.clone();
+        let was_unread = old_labels.contains(&"UNREAD".to_string());
+        let is_unread = label_ids.contains(&"UNREAD".to_string());
+
+        let thread_id = message.thread_id.as_str().to_string();
+        let timestamp = message.received_at.timestamp_millis();
+
+        // Update message labels
+        message.label_ids = label_ids.clone();
+        let data = serde_json::to_vec(&message)?;
+        self.messages.put(&mut wtxn, message_id.as_str(), &data)?;
+
+        // Update label index - remove old labels that are no longer present
+        for label in &old_labels {
+            if !label_ids.contains(label) {
+                let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+                if let Some(old_ts) = self.thread_label_ts.get(&wtxn, &reverse_key)? {
+                    let old_index_key = Self::build_label_index_key(label, old_ts as i64, &thread_id);
+                    self.label_thread_index.delete(&mut wtxn, &old_index_key)?;
+                }
+                self.thread_label_ts.delete(&mut wtxn, &reverse_key)?;
+            }
+        }
+
+        // Add new labels that weren't present before
+        for label in &label_ids {
+            if !old_labels.contains(label) {
+                let reverse_key = Self::build_reverse_index_key(&thread_id, label);
+                let index_key = Self::build_label_index_key(label, timestamp, &thread_id);
+                self.label_thread_index.put(&mut wtxn, &index_key, &[])?;
+                self.thread_label_ts.put(&mut wtxn, &reverse_key, &(timestamp as u64))?;
+            }
+        }
+
+        // Update thread is_unread flag if UNREAD status changed
+        if was_unread != is_unread {
+            if let Some(data) = self.threads.get(&wtxn, &thread_id)? {
+                let mut thread: Thread = serde_json::from_slice(data)?;
+
+                // Check if any message in thread is still unread
+                // Get message IDs inline to avoid nested transaction from get_thread_message_ids
+                let msg_ids: Vec<String> = match self.thread_messages.get(&wtxn, &thread_id)? {
+                    Some(data) => serde_json::from_slice(data)?,
+                    None => Vec::new(),
+                };
+
+                let any_unread = msg_ids.iter().any(|id| {
+                    self.messages
+                        .get(&wtxn, id)
+                        .ok()
+                        .flatten()
+                        .and_then(|data| serde_json::from_slice::<Message>(data).ok())
+                        .map(|m| m.label_ids.contains(&"UNREAD".to_string()))
+                        .unwrap_or(false)
+                });
+
+                thread.is_unread = any_unread;
+                let data = serde_json::to_vec(&thread)?;
+                self.threads.put(&mut wtxn, &thread_id, &data)?;
+            }
+        }
+
+        wtxn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

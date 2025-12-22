@@ -4996,6 +4996,7 @@ dependencies = [
  "lb-wry",
  "log",
  "mail",
+ "rust-embed",
  "serde_json",
  "tokio",
 ]

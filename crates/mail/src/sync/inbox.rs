@@ -38,6 +38,8 @@ pub struct SyncStats {
     pub messages_updated: usize,
     /// Number of messages skipped (already synced)
     pub messages_skipped: usize,
+    /// Number of label changes applied (from incremental sync)
+    pub labels_updated: usize,
     /// Number of threads created
     pub threads_created: usize,
     /// Number of threads updated
@@ -316,11 +318,14 @@ fn incremental_sync(
         .list_history_all(&state.history_id)
         .context("Failed to fetch history")?;
 
-    // Collect message IDs to fetch
+    // Collect message IDs to fetch (new messages)
     let mut message_ids_to_fetch: Vec<MessageId> = Vec::new();
+    // Track threads that need updating due to label changes
+    let mut threads_to_update: HashSet<ThreadId> = HashSet::new();
 
     if let Some(records) = &history.history {
         for record in records {
+            // Handle new messages
             if let Some(added) = &record.messages_added {
                 for msg_added in added {
                     let msg_id = MessageId::new(&msg_added.message.id);
@@ -330,64 +335,103 @@ fn incremental_sync(
                     }
                 }
             }
+
+            // Handle labels added to messages
+            if let Some(labels_added) = &record.labels_added {
+                for change in labels_added {
+                    let msg_id = MessageId::new(&change.message.id);
+                    if let Some(mut msg) = store.get_message(&msg_id)? {
+                        // Add labels that aren't already present
+                        for label in &change.label_ids {
+                            if !msg.label_ids.contains(label) {
+                                msg.label_ids.push(label.clone());
+                            }
+                        }
+                        store.update_message_labels(&msg_id, msg.label_ids)?;
+                        stats.labels_updated += 1;
+                        threads_to_update.insert(msg.thread_id);
+                    }
+                }
+            }
+
+            // Handle labels removed from messages
+            if let Some(labels_removed) = &record.labels_removed {
+                for change in labels_removed {
+                    let msg_id = MessageId::new(&change.message.id);
+                    if let Some(mut msg) = store.get_message(&msg_id)? {
+                        // Remove the specified labels
+                        msg.label_ids.retain(|l| !change.label_ids.contains(l));
+                        store.update_message_labels(&msg_id, msg.label_ids)?;
+                        stats.labels_updated += 1;
+                        threads_to_update.insert(msg.thread_id);
+                    }
+                }
+            }
         }
     }
 
     stats.messages_fetched = message_ids_to_fetch.len();
 
-    if message_ids_to_fetch.is_empty() {
-        // No new messages, but update sync state with new history ID
-        if let Some(new_history_id) = history.history_id {
-            let updated_state = state.clone().updated(new_history_id);
-            store.save_sync_state(updated_state)?;
-        }
-        return Ok(stats);
-    }
-
     // Track which threads we've seen for stats
     let mut threads_seen: HashSet<ThreadId> = HashSet::new();
 
-    // Fetch and store each message immediately as it arrives
-    let results = gmail.get_messages_batch(&message_ids_to_fetch);
-    for result in results {
-        match result {
-            Ok(gmail_msg) => match normalize_message(gmail_msg) {
-                Ok(message) => {
-                    let thread_id = message.thread_id.clone();
-                    let is_new_thread = !store.has_thread(&thread_id)?;
+    // Fetch and store new messages
+    if !message_ids_to_fetch.is_empty() {
+        let results = gmail.get_messages_batch(&message_ids_to_fetch);
+        for result in results {
+            match result {
+                Ok(gmail_msg) => match normalize_message(gmail_msg) {
+                    Ok(message) => {
+                        let thread_id = message.thread_id.clone();
+                        let is_new_thread = !store.has_thread(&thread_id)?;
 
-                    // Store message immediately
-                    store.upsert_message(message.clone())?;
-                    stats.messages_created += 1;
+                        // Store message immediately
+                        store.upsert_message(message.clone())?;
+                        stats.messages_created += 1;
 
-                    // Update thread (message is already in store, pass empty slice)
-                    let thread = compute_thread(&thread_id, &[], store)?;
-                    store.upsert_thread(thread.clone())?;
+                        // Update thread (message is already in store, pass empty slice)
+                        let thread = compute_thread(&thread_id, &[], store)?;
+                        store.upsert_thread(thread.clone())?;
 
-                    // Index for search if index is provided
-                    if let Some(ref index) = options.search_index {
-                        if let Err(e) = index.index_message(&message, &thread) {
-                            warn!("Failed to index message {}: {}", message.id.as_str(), e);
+                        // Index for search if index is provided
+                        if let Some(ref index) = options.search_index {
+                            if let Err(e) = index.index_message(&message, &thread) {
+                                warn!("Failed to index message {}: {}", message.id.as_str(), e);
+                            }
                         }
-                    }
 
-                    // Track thread stats (only count once)
-                    if threads_seen.insert(thread_id) {
-                        if is_new_thread {
-                            stats.threads_created += 1;
-                        } else {
-                            stats.threads_updated += 1;
+                        // Track thread stats (only count once)
+                        if threads_seen.insert(thread_id.clone()) {
+                            if is_new_thread {
+                                stats.threads_created += 1;
+                            } else {
+                                stats.threads_updated += 1;
+                            }
                         }
+
+                        // Remove from threads_to_update since we just updated it
+                        threads_to_update.remove(&thread_id);
                     }
-                }
+                    Err(e) => {
+                        warn!("Failed to normalize message: {}", e);
+                        stats.errors += 1;
+                    }
+                },
                 Err(e) => {
-                    warn!("Failed to normalize message: {}", e);
+                    warn!("Failed to fetch message: {}", e);
                     stats.errors += 1;
                 }
-            },
-            Err(e) => {
-                warn!("Failed to fetch message: {}", e);
-                stats.errors += 1;
+            }
+        }
+    }
+
+    // Update threads affected by label changes (that weren't already updated)
+    for thread_id in threads_to_update {
+        if store.has_thread(&thread_id)? {
+            let thread = compute_thread(&thread_id, &[], store)?;
+            store.upsert_thread(thread)?;
+            if threads_seen.insert(thread_id) {
+                stats.threads_updated += 1;
             }
         }
     }
@@ -404,6 +448,11 @@ fn incremental_sync(
         let updated_state = state.clone().updated(new_history_id);
         store.save_sync_state(updated_state)?;
     }
+
+    info!(
+        "Incremental sync: {} messages, {} label updates",
+        stats.messages_created, stats.labels_updated
+    );
 
     Ok(stats)
 }

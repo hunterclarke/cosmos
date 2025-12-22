@@ -66,4 +66,17 @@ pub trait MailStore: Send + Sync {
 
     /// Clear all mail data (messages and threads) but preserve sync state
     fn clear_mail_data(&self) -> Result<()>;
+
+    // === Phase 3: Mutation Support Methods ===
+
+    /// Get all message IDs for a thread
+    ///
+    /// Used for batch operations like archiving all messages in a thread.
+    fn get_message_ids_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageId>>;
+
+    /// Update labels on a message
+    ///
+    /// Replaces the entire label_ids array on the message.
+    /// Also updates thread-level is_unread flag if UNREAD label changes.
+    fn update_message_labels(&self, message_id: &MessageId, label_ids: Vec<String>) -> Result<()>;
 }

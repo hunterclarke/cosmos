@@ -8,8 +8,8 @@ use gpui_component::webview::WebView;
 use gpui_component::{ActiveTheme, Sizable};
 use log::{debug, error, info, warn};
 use mail::{
-    GmailAuth, GmailClient, HeedMailStore, Label, LabelId, MailStore, SearchIndex, SyncOptions,
-    ThreadId, sync_gmail,
+    ActionHandler, GmailAuth, GmailClient, HeedMailStore, Label, LabelId, MailStore, SearchIndex,
+    SyncOptions, ThreadId, sync_gmail,
 };
 use std::sync::Arc;
 
@@ -30,6 +30,8 @@ pub enum View {
     Thread {
         /// Pre-generated HTML for the thread (generated on navigation, not during render)
         html: String,
+        /// Thread ID being viewed
+        thread_id: ThreadId,
     },
     Search,
 }
@@ -39,6 +41,8 @@ pub struct OrionApp {
     current_view: View,
     store: Arc<dyn MailStore>,
     gmail_client: Option<Arc<GmailClient>>,
+    /// Action handler for email operations (archive, star, read/unread)
+    action_handler: Option<Arc<ActionHandler>>,
     is_syncing: bool,
     sync_error: Option<String>,
     /// Last successful sync timestamp
@@ -81,6 +85,7 @@ impl OrionApp {
             current_view: View::Inbox,
             store,
             gmail_client: None,
+            action_handler: None,
             is_syncing: false,
             sync_error: None,
             last_sync_at: None,
@@ -146,6 +151,14 @@ impl OrionApp {
                         app.store = store.clone();
                         app.last_sync_at = last_sync_at;
                         app.search_index = search_index;
+
+                        // Update action handler with the new store
+                        if let Some(gmail_client) = &app.gmail_client {
+                            app.action_handler = Some(Arc::new(ActionHandler::new(
+                                gmail_client.clone(),
+                                store.clone(),
+                            )));
+                        }
 
                         // Update thread list view with the real store
                         if let Some(thread_list) = &app.thread_list_view {
@@ -335,11 +348,200 @@ impl OrionApp {
         });
     }
 
+    /// Get the current thread ID if viewing a thread
+    pub fn current_thread_id(&self) -> Option<&ThreadId> {
+        match &self.current_view {
+            View::Thread { thread_id, .. } => Some(thread_id),
+            _ => None,
+        }
+    }
+
+    /// Archive the current thread
+    pub fn archive_current_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.current_thread_id().cloned() else {
+            return;
+        };
+        let Some(action_handler) = self.action_handler.clone() else {
+            warn!("Cannot archive: action handler not available");
+            return;
+        };
+
+        info!("Archiving thread {}", thread_id.as_str());
+
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = background
+                .spawn(async move { action_handler.archive_thread(&thread_id) })
+                .await;
+
+            cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            info!("Thread archived successfully");
+                            // Go back to inbox after archiving
+                            app.show_inbox(cx);
+                            // Refresh thread list
+                            if let Some(thread_list) = &app.thread_list_view {
+                                thread_list.update(cx, |view, cx| view.load_threads(cx));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to archive thread: {}", e);
+                        }
+                    }
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Toggle star on the current thread
+    pub fn toggle_star_current_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.current_thread_id().cloned() else {
+            return;
+        };
+        let Some(action_handler) = self.action_handler.clone() else {
+            warn!("Cannot toggle star: action handler not available");
+            return;
+        };
+
+        info!("Toggling star for thread {}", thread_id.as_str());
+
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = background
+                .spawn(async move { action_handler.toggle_star(&thread_id) })
+                .await;
+
+            cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(new_starred) => {
+                            info!(
+                                "Thread {} {}",
+                                if new_starred { "starred" } else { "unstarred" },
+                                app.current_thread_id()
+                                    .map(|id| id.as_str())
+                                    .unwrap_or("unknown")
+                            );
+                            // Refresh thread list to show updated star state
+                            if let Some(thread_list) = &app.thread_list_view {
+                                thread_list.update(cx, |view, cx| view.load_threads(cx));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to toggle star: {}", e);
+                        }
+                    }
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Toggle read status on the current thread
+    pub fn toggle_read_current_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.current_thread_id().cloned() else {
+            return;
+        };
+        let Some(action_handler) = self.action_handler.clone() else {
+            warn!("Cannot toggle read: action handler not available");
+            return;
+        };
+
+        info!("Toggling read status for thread {}", thread_id.as_str());
+
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = background
+                .spawn(async move { action_handler.toggle_read(&thread_id) })
+                .await;
+
+            cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(new_is_read) => {
+                            info!(
+                                "Thread marked as {}",
+                                if new_is_read { "read" } else { "unread" }
+                            );
+                            // Refresh thread list to show updated read state
+                            if let Some(thread_list) = &app.thread_list_view {
+                                thread_list.update(cx, |view, cx| view.load_threads(cx));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to toggle read status: {}", e);
+                        }
+                    }
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Trash the current thread
+    pub fn trash_current_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.current_thread_id().cloned() else {
+            return;
+        };
+        let Some(action_handler) = self.action_handler.clone() else {
+            warn!("Cannot trash: action handler not available");
+            return;
+        };
+
+        info!("Trashing thread {}", thread_id.as_str());
+
+        let background = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = background
+                .spawn(async move { action_handler.trash_thread(&thread_id) })
+                .await;
+
+            cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    match result {
+                        Ok(()) => {
+                            info!("Thread trashed successfully");
+                            // Go back to inbox after trashing
+                            app.show_inbox(cx);
+                            // Refresh thread list
+                            if let Some(thread_list) = &app.thread_list_view {
+                                thread_list.update(cx, |view, cx| view.load_threads(cx));
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to trash thread: {}", e);
+                        }
+                    }
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Initialize Gmail client with credentials
     pub fn init_gmail(&mut self, client_id: String, client_secret: String) -> anyhow::Result<()> {
         let auth = GmailAuth::new(client_id, client_secret)?;
         let client = GmailClient::new(auth);
-        self.gmail_client = Some(Arc::new(client));
+        let gmail_client = Arc::new(client);
+        self.gmail_client = Some(gmail_client.clone());
+
+        // Create action handler now that we have the Gmail client
+        self.action_handler = Some(Arc::new(ActionHandler::new(
+            gmail_client,
+            self.store.clone(),
+        )));
+
         Ok(())
     }
 
@@ -384,6 +586,7 @@ impl OrionApp {
         };
 
         let app_handle = cx.entity().clone();
+        let thread_id_clone = thread_id.clone();
         self.thread_view = Some(cx.new(|cx| {
             let mut view = ThreadView::new(store, thread_id.clone());
             view.set_app(app_handle);
@@ -392,8 +595,35 @@ impl OrionApp {
         }));
         self.current_view = View::Thread {
             html: thread_html.clone(),
+            thread_id: thread_id_clone.clone(),
         };
         cx.notify();
+
+        // Mark thread as read in background
+        if let Some(action_handler) = self.action_handler.clone() {
+            let background = cx.background_executor().clone();
+            cx.spawn(async move |this, cx| {
+                let result = background
+                    .spawn(async move { action_handler.set_read(&thread_id_clone, true) })
+                    .await;
+
+                if let Err(e) = result {
+                    error!("Failed to mark thread as read: {}", e);
+                }
+
+                // Refresh thread list to show updated read state
+                cx.update(|cx| {
+                    this.update(cx, |app, cx| {
+                        if let Some(thread_list) = &app.thread_list_view {
+                            thread_list.update(cx, |view, cx| view.load_threads(cx));
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     /// Select a label/folder to view
@@ -601,6 +831,9 @@ impl OrionApp {
                             )
                             .child(
                                 Button::new("sync-button")
+                                    .icon(gpui_component::Icon::new(
+                                        crate::assets::icons::RefreshCw,
+                                    ))
                                     .label(if is_syncing { "Syncing..." } else { "Sync" })
                                     .small()
                                     .ghost()
@@ -660,7 +893,7 @@ impl OrionApp {
         // Extract data from current_view before any mutable borrows
         let (html_content, thread_entity, is_search) = match &self.current_view {
             View::Inbox => (None, None, false),
-            View::Thread { html } => (Some(html.clone()), self.thread_view.clone(), false),
+            View::Thread { html, .. } => (Some(html.clone()), self.thread_view.clone(), false),
             View::Search => (None, None, true),
         };
 

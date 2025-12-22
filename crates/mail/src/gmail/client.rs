@@ -9,7 +9,10 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use super::api::{GmailMessage, HistoryResponse, ListLabelsResponse, ListMessagesResponse};
+use super::api::{
+    BatchModifyRequest, GmailMessage, HistoryResponse, ListLabelsResponse, ListMessagesResponse,
+    ModifyMessageRequest,
+};
 use super::GmailAuth;
 use crate::models::MessageId;
 
@@ -341,8 +344,9 @@ impl GmailClient {
     ) -> Result<HistoryResponse> {
         let access_token = self.auth.get_access_token()?;
 
+        // Request all relevant history types: new messages and label changes
         let mut url = format!(
-            "{}/users/me/history?startHistoryId={}&historyTypes=messageAdded",
+            "{}/users/me/history?startHistoryId={}&historyTypes=messageAdded&historyTypes=labelAdded&historyTypes=labelRemoved",
             Self::BASE_URL,
             start_history_id
         );
@@ -408,6 +412,105 @@ impl GmailClient {
             },
             next_page_token: None,
         })
+    }
+
+    // === Message Mutation Methods ===
+
+    /// Modify labels on a single message
+    ///
+    /// This is the core mutation primitive for archive, star, read/unread operations.
+    ///
+    /// # Arguments
+    /// * `message_id` - The message ID to modify
+    /// * `add_labels` - Label IDs to add (e.g., "STARRED", "UNREAD")
+    /// * `remove_labels` - Label IDs to remove (e.g., "INBOX", "UNREAD")
+    ///
+    /// # Examples
+    /// - Archive: `modify_message(id, &[], &["INBOX"])`
+    /// - Star: `modify_message(id, &["STARRED"], &[])`
+    /// - Mark read: `modify_message(id, &[], &["UNREAD"])`
+    /// - Mark unread: `modify_message(id, &["UNREAD"], &[])`
+    pub fn modify_message(
+        &self,
+        message_id: &str,
+        add_labels: &[&str],
+        remove_labels: &[&str],
+    ) -> Result<GmailMessage> {
+        let access_token = self.auth.get_access_token()?;
+
+        let url = format!(
+            "{}/users/me/messages/{}/modify",
+            Self::BASE_URL,
+            message_id
+        );
+
+        let request = ModifyMessageRequest {
+            add_label_ids: add_labels.iter().map(|s| s.to_string()).collect(),
+            remove_label_ids: remove_labels.iter().map(|s| s.to_string()).collect(),
+        };
+
+        let mut response = ureq::post(&url)
+            .header("Authorization", &format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .send_json(&request)
+            .context("Failed to send modify message request")?;
+
+        let message: GmailMessage = response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse modify message response")?;
+
+        info!(
+            "Modified message {}: +{:?} -{:?}",
+            message_id, add_labels, remove_labels
+        );
+
+        Ok(message)
+    }
+
+    /// Batch modify labels on multiple messages
+    ///
+    /// More efficient than calling modify_message in a loop.
+    /// Note: This endpoint has no response body on success.
+    ///
+    /// # Arguments
+    /// * `message_ids` - The message IDs to modify
+    /// * `add_labels` - Label IDs to add
+    /// * `remove_labels` - Label IDs to remove
+    pub fn batch_modify_messages(
+        &self,
+        message_ids: &[&str],
+        add_labels: &[&str],
+        remove_labels: &[&str],
+    ) -> Result<()> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+
+        let access_token = self.auth.get_access_token()?;
+
+        let url = format!("{}/users/me/messages/batchModify", Self::BASE_URL);
+
+        let request = BatchModifyRequest {
+            ids: message_ids.iter().map(|s| s.to_string()).collect(),
+            add_label_ids: add_labels.iter().map(|s| s.to_string()).collect(),
+            remove_label_ids: remove_labels.iter().map(|s| s.to_string()).collect(),
+        };
+
+        ureq::post(&url)
+            .header("Authorization", &format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .send_json(&request)
+            .context("Failed to send batch modify request")?;
+
+        info!(
+            "Batch modified {} messages: +{:?} -{:?}",
+            message_ids.len(),
+            add_labels,
+            remove_labels
+        );
+
+        Ok(())
     }
 }
 
