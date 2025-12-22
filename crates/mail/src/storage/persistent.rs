@@ -8,7 +8,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Tab
 use std::path::Path;
 use std::sync::Arc;
 
-use super::MailStore;
+use super::{MailStore, PendingMessage};
 use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 
 // Table definitions
@@ -22,6 +22,15 @@ const THREAD_MESSAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("thre
 const LABEL_THREAD_INDEX: TableDefinition<&str, ()> = TableDefinition::new("label_thread_index");
 // Reverse index: "{thread_id}\0{label}" -> timestamp_millis (as i64 bytes)
 const THREAD_LABEL_TS: TableDefinition<&str, &[u8]> = TableDefinition::new("thread_label_ts");
+// Pending messages for deferred processing: message_id -> PendingMessageData (JSON)
+const PENDING_MESSAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("pending_messages");
+
+/// Internal storage format for pending messages
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingMessageData {
+    data: Vec<u8>,
+    label_ids: Vec<String>,
+}
 
 /// Persistent storage implementation using redb
 pub struct RedbMailStore {
@@ -71,6 +80,7 @@ impl RedbMailStore {
             let _ = write_txn.open_table(THREAD_MESSAGES)?;
             let _ = write_txn.open_table(LABEL_THREAD_INDEX)?;
             let _ = write_txn.open_table(THREAD_LABEL_TS)?;
+            let _ = write_txn.open_table(PENDING_MESSAGES)?;
         }
         write_txn.commit()?;
         Ok(())
@@ -357,6 +367,7 @@ impl MailStore for RedbMailStore {
             let mut thread_messages = write_txn.open_table(THREAD_MESSAGES)?;
             let mut label_index = write_txn.open_table(LABEL_THREAD_INDEX)?;
             let mut thread_label_ts = write_txn.open_table(THREAD_LABEL_TS)?;
+            let mut pending = write_txn.open_table(PENDING_MESSAGES)?;
 
             // Drain all entries
             while threads.pop_first()?.is_some() {}
@@ -365,6 +376,7 @@ impl MailStore for RedbMailStore {
             while thread_messages.pop_first()?.is_some() {}
             while label_index.pop_first()?.is_some() {}
             while thread_label_ts.pop_first()?.is_some() {}
+            while pending.pop_first()?.is_some() {}
         }
         write_txn.commit()?;
         Ok(())
@@ -620,6 +632,126 @@ impl MailStore for RedbMailStore {
         }
         write_txn.commit()?;
 
+        Ok(())
+    }
+
+    // === Phase 4: Pending Message Queue ===
+
+    fn store_pending_message(
+        &self,
+        id: &MessageId,
+        data: &[u8],
+        label_ids: Vec<String>,
+    ) -> Result<()> {
+        let pending_data = PendingMessageData {
+            data: data.to_vec(),
+            label_ids,
+        };
+        let serialized = serde_json::to_vec(&pending_data)?;
+
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PENDING_MESSAGES)?;
+            table.insert(id.as_str(), serialized.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn has_pending_message(&self, id: &MessageId) -> Result<bool> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PENDING_MESSAGES)?;
+        Ok(table.get(id.as_str())?.is_some())
+    }
+
+    fn get_pending_messages(
+        &self,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingMessage>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PENDING_MESSAGES)?;
+
+        let mut inbox_messages = Vec::new();
+        let mut other_messages = Vec::new();
+
+        for result in table.iter()? {
+            let (key, value) = result?;
+            let pending_data: PendingMessageData = serde_json::from_slice(value.value())?;
+
+            let msg = PendingMessage {
+                id: MessageId::new(key.value()),
+                data: pending_data.data,
+                label_ids: pending_data.label_ids.clone(),
+            };
+
+            if let Some(filter_label) = label {
+                if pending_data.label_ids.iter().any(|l| l == filter_label) {
+                    inbox_messages.push(msg);
+                }
+            } else {
+                if pending_data.label_ids.iter().any(|l| l == "INBOX") {
+                    inbox_messages.push(msg);
+                } else {
+                    other_messages.push(msg);
+                }
+            }
+
+            if label.is_some() && inbox_messages.len() >= limit {
+                break;
+            }
+            if label.is_none() && inbox_messages.len() + other_messages.len() >= limit {
+                break;
+            }
+        }
+
+        if label.is_some() {
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        } else {
+            inbox_messages.extend(other_messages);
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        }
+    }
+
+    fn delete_pending_message(&self, id: &MessageId) -> Result<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PENDING_MESSAGES)?;
+            table.remove(id.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(PENDING_MESSAGES)?;
+
+        if label.is_none() {
+            return Ok(table.len()? as usize);
+        }
+
+        let mut count = 0;
+        for result in table.iter()? {
+            let (_, value) = result?;
+            let pending_data: PendingMessageData = serde_json::from_slice(value.value())?;
+            if pending_data.label_ids.iter().any(|l| l == label.unwrap()) {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    fn clear_pending_messages(&self) -> Result<()> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PENDING_MESSAGES)?;
+            while table.pop_first()?.is_some() {}
+        }
+        write_txn.commit()?;
         Ok(())
     }
 }

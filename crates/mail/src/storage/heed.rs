@@ -11,11 +11,18 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::MailStore;
+use super::{MailStore, PendingMessage};
 use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 
 /// Default map size: 10 GB (LMDB requires pre-allocated map size)
 const DEFAULT_MAP_SIZE: usize = 10 * 1024 * 1024 * 1024;
+
+/// Internal storage format for pending messages
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingMessageData {
+    data: Vec<u8>,
+    label_ids: Vec<String>,
+}
 
 /// Persistent storage implementation using heed3/LMDB
 pub struct HeedMailStore {
@@ -32,6 +39,9 @@ pub struct HeedMailStore {
     label_thread_index: Database<Str, Bytes>,
     /// thread_label_ts: "{thread_id}\0{label}" -> timestamp_millis
     thread_label_ts: Database<Str, U64<BE>>,
+    /// pending_messages: message_id -> PendingMessageData (JSON)
+    /// Stores raw Gmail API responses for deferred processing
+    pending_messages: Database<Str, Bytes>,
 }
 
 impl HeedMailStore {
@@ -69,6 +79,8 @@ impl HeedMailStore {
             .create_database(&mut wtxn, Some("label_thread_index"))?;
         let thread_label_ts = env
             .create_database(&mut wtxn, Some("thread_label_ts"))?;
+        let pending_messages = env
+            .create_database(&mut wtxn, Some("pending_messages"))?;
 
         wtxn.commit()?;
 
@@ -80,6 +92,7 @@ impl HeedMailStore {
             thread_messages,
             label_thread_index,
             thread_label_ts,
+            pending_messages,
         })
     }
 
@@ -533,6 +546,120 @@ impl MailStore for HeedMailStore {
             self.threads.put(&mut wtxn, &thread_id, &updated_data)?;
         }
 
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    // === Phase 4: Pending Message Queue ===
+
+    fn store_pending_message(
+        &self,
+        id: &MessageId,
+        data: &[u8],
+        label_ids: Vec<String>,
+    ) -> Result<()> {
+        let pending_data = PendingMessageData {
+            data: data.to_vec(),
+            label_ids,
+        };
+        let serialized = serde_json::to_vec(&pending_data)?;
+
+        let mut wtxn = self.env.write_txn()?;
+        self.pending_messages.put(&mut wtxn, id.as_str(), &serialized)?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    fn has_pending_message(&self, id: &MessageId) -> Result<bool> {
+        let rtxn = self.env.read_txn()?;
+        Ok(self.pending_messages.get(&rtxn, id.as_str())?.is_some())
+    }
+
+    fn get_pending_messages(
+        &self,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingMessage>> {
+        let rtxn = self.env.read_txn()?;
+
+        let mut inbox_messages = Vec::new();
+        let mut other_messages = Vec::new();
+
+        for result in self.pending_messages.iter(&rtxn)? {
+            let (key, value) = result?;
+            let pending_data: PendingMessageData = serde_json::from_slice(value)?;
+
+            let msg = PendingMessage {
+                id: MessageId::new(key),
+                data: pending_data.data,
+                label_ids: pending_data.label_ids.clone(),
+            };
+
+            // If filtering by label, check if message has it
+            if let Some(filter_label) = label {
+                if pending_data.label_ids.iter().any(|l| l == filter_label) {
+                    inbox_messages.push(msg);
+                }
+            } else {
+                // No filter - prioritize INBOX messages
+                if pending_data.label_ids.iter().any(|l| l == "INBOX") {
+                    inbox_messages.push(msg);
+                } else {
+                    other_messages.push(msg);
+                }
+            }
+
+            // Early exit if we have enough
+            if label.is_some() && inbox_messages.len() >= limit {
+                break;
+            }
+            if label.is_none() && inbox_messages.len() + other_messages.len() >= limit {
+                break;
+            }
+        }
+
+        // Return inbox first, then others (if no label filter)
+        if label.is_some() {
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        } else {
+            inbox_messages.extend(other_messages);
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        }
+    }
+
+    fn delete_pending_message(&self, id: &MessageId) -> Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        self.pending_messages.delete(&mut wtxn, id.as_str())?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize> {
+        let rtxn = self.env.read_txn()?;
+
+        if label.is_none() {
+            // Fast path: just count all
+            return Ok(self.pending_messages.len(&rtxn)? as usize);
+        }
+
+        // Count with label filter
+        let mut count = 0;
+        for result in self.pending_messages.iter(&rtxn)? {
+            let (_, value) = result?;
+            let pending_data: PendingMessageData = serde_json::from_slice(value)?;
+            if pending_data.label_ids.iter().any(|l| l == label.unwrap()) {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    fn clear_pending_messages(&self) -> Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        self.pending_messages.clear(&mut wtxn)?;
         wtxn.commit()?;
         Ok(())
     }

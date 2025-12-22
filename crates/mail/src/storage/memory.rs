@@ -8,13 +8,19 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
-use super::MailStore;
+use super::{MailStore, PendingMessage};
 use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 
 /// In-memory implementation of MailStore
 ///
 /// Uses HashMaps protected by RwLocks for thread-safe access.
 /// This is a stub implementation for Phase 1, extended for Phase 2.
+/// Internal storage for pending messages
+struct PendingMessageData {
+    data: Vec<u8>,
+    label_ids: Vec<String>,
+}
+
 pub struct InMemoryMailStore {
     threads: RwLock<HashMap<String, Thread>>,
     messages: RwLock<HashMap<String, Message>>,
@@ -27,6 +33,8 @@ pub struct InMemoryMailStore {
     /// Reverse index: (thread_id, label) -> timestamp_millis
     /// Used to find and remove old entries when timestamp changes
     thread_label_ts: RwLock<HashMap<(String, String), i64>>,
+    /// Pending messages for deferred processing (Phase 4)
+    pending_messages: RwLock<HashMap<String, PendingMessageData>>,
 }
 
 impl InMemoryMailStore {
@@ -39,6 +47,7 @@ impl InMemoryMailStore {
             sync_states: RwLock::new(HashMap::new()),
             label_thread_index: RwLock::new(HashMap::new()),
             thread_label_ts: RwLock::new(HashMap::new()),
+            pending_messages: RwLock::new(HashMap::new()),
         }
     }
 
@@ -217,6 +226,7 @@ impl MailStore for InMemoryMailStore {
         self.sync_states.write().unwrap().clear();
         self.label_thread_index.write().unwrap().clear();
         self.thread_label_ts.write().unwrap().clear();
+        self.pending_messages.write().unwrap().clear();
         Ok(())
     }
 
@@ -394,6 +404,101 @@ impl MailStore for InMemoryMailStore {
             thread.message_count = remaining_count;
         }
 
+        Ok(())
+    }
+
+    // === Phase 4: Pending Message Queue ===
+
+    fn store_pending_message(
+        &self,
+        id: &MessageId,
+        data: &[u8],
+        label_ids: Vec<String>,
+    ) -> Result<()> {
+        let pending_data = PendingMessageData {
+            data: data.to_vec(),
+            label_ids,
+        };
+        self.pending_messages
+            .write()
+            .unwrap()
+            .insert(id.0.clone(), pending_data);
+        Ok(())
+    }
+
+    fn has_pending_message(&self, id: &MessageId) -> Result<bool> {
+        Ok(self.pending_messages.read().unwrap().contains_key(&id.0))
+    }
+
+    fn get_pending_messages(
+        &self,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingMessage>> {
+        let pending = self.pending_messages.read().unwrap();
+
+        let mut inbox_messages = Vec::new();
+        let mut other_messages = Vec::new();
+
+        for (id, data) in pending.iter() {
+            let msg = PendingMessage {
+                id: MessageId::new(id),
+                data: data.data.clone(),
+                label_ids: data.label_ids.clone(),
+            };
+
+            if let Some(filter_label) = label {
+                if data.label_ids.iter().any(|l| l == filter_label) {
+                    inbox_messages.push(msg);
+                }
+            } else {
+                if data.label_ids.iter().any(|l| l == "INBOX") {
+                    inbox_messages.push(msg);
+                } else {
+                    other_messages.push(msg);
+                }
+            }
+
+            if label.is_some() && inbox_messages.len() >= limit {
+                break;
+            }
+            if label.is_none() && inbox_messages.len() + other_messages.len() >= limit {
+                break;
+            }
+        }
+
+        if label.is_some() {
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        } else {
+            inbox_messages.extend(other_messages);
+            inbox_messages.truncate(limit);
+            Ok(inbox_messages)
+        }
+    }
+
+    fn delete_pending_message(&self, id: &MessageId) -> Result<()> {
+        self.pending_messages.write().unwrap().remove(&id.0);
+        Ok(())
+    }
+
+    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize> {
+        let pending = self.pending_messages.read().unwrap();
+
+        if label.is_none() {
+            return Ok(pending.len());
+        }
+
+        let count = pending
+            .values()
+            .filter(|data| data.label_ids.iter().any(|l| l == label.unwrap()))
+            .count();
+
+        Ok(count)
+    }
+
+    fn clear_pending_messages(&self) -> Result<()> {
+        self.pending_messages.write().unwrap().clear();
         Ok(())
     }
 }

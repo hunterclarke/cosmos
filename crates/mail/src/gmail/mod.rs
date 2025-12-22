@@ -65,7 +65,7 @@ pub mod api {
     }
 
     /// Full message from Gmail API
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct GmailMessage {
         pub id: String,
@@ -77,7 +77,7 @@ pub mod api {
     }
 
     /// Message payload containing headers and body
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct MessagePayload {
         pub headers: Option<Vec<Header>>,
@@ -94,14 +94,14 @@ pub mod api {
     }
 
     /// Message body (may be base64 encoded)
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct MessageBody {
         pub size: Option<u32>,
         pub data: Option<String>,
     }
 
     /// Message part (for multipart messages)
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct MessagePart {
         pub part_id: Option<String>,

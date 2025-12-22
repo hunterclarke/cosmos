@@ -3,6 +3,20 @@
 use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 use anyhow::Result;
 
+/// A raw message pending processing
+///
+/// Stores the raw Gmail API response for deferred processing.
+/// This allows fetching at max API speed, then processing separately.
+#[derive(Debug, Clone)]
+pub struct PendingMessage {
+    /// Message ID
+    pub id: MessageId,
+    /// Raw Gmail API JSON response (serialized GmailMessage)
+    pub data: Vec<u8>,
+    /// Label IDs from the message (for prioritization - e.g., INBOX first)
+    pub label_ids: Vec<String>,
+}
+
 /// Trait for mail storage operations
 ///
 /// This trait abstracts over different storage backends (in-memory, database, etc.)
@@ -85,4 +99,33 @@ pub trait MailStore: Send + Sync {
     /// Also updates the thread's message_count. If this was the last message
     /// in the thread, the thread is also deleted.
     fn delete_message(&self, message_id: &MessageId) -> Result<()>;
+
+    // === Phase 4: Pending Message Queue (Decoupled Fetch/Process) ===
+
+    /// Store a raw message for deferred processing
+    ///
+    /// This allows fetching at max Gmail API speed without blocking on processing.
+    /// Messages are stored with their label_ids for prioritization (INBOX first).
+    fn store_pending_message(&self, id: &MessageId, data: &[u8], label_ids: Vec<String>)
+        -> Result<()>;
+
+    /// Check if a pending message exists
+    fn has_pending_message(&self, id: &MessageId) -> Result<bool>;
+
+    /// Get pending messages for processing, prioritized by label
+    ///
+    /// Returns messages with the given label first. If label is None, returns
+    /// messages in arbitrary order. Limit controls batch size.
+    fn get_pending_messages(&self, label: Option<&str>, limit: usize) -> Result<Vec<PendingMessage>>;
+
+    /// Delete a pending message after successful processing
+    ///
+    /// Call this after the message has been normalized and stored to free storage.
+    fn delete_pending_message(&self, id: &MessageId) -> Result<()>;
+
+    /// Count pending messages (optionally filtered by label)
+    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize>;
+
+    /// Clear all pending messages
+    fn clear_pending_messages(&self) -> Result<()>;
 }

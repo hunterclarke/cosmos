@@ -9,7 +9,7 @@ use gpui_component::{ActiveTheme, Sizable};
 use log::{debug, error, info, warn};
 use mail::{
     ActionHandler, GmailAuth, GmailClient, HeedMailStore, Label, LabelId, MailStore, SearchIndex,
-    SyncOptions, ThreadId, sync_gmail,
+    SyncOptions, SyncStats, ThreadId,
 };
 use std::sync::Arc;
 
@@ -715,8 +715,13 @@ impl OrionApp {
         cx.notify();
     }
 
-    /// Trigger inbox sync
+    /// Trigger inbox sync with event-driven UI updates
+    ///
+    /// Instead of polling every 500ms, this updates the UI after each batch
+    /// of messages is processed, providing real-time feedback.
     pub fn sync(&mut self, cx: &mut Context<Self>) {
+        use mail::{fetch_phase, process_pending_batch};
+
         if self.is_syncing {
             return;
         }
@@ -733,91 +738,140 @@ impl OrionApp {
 
         let store = self.store.clone();
         let search_index = self.search_index.clone();
+        let background = cx.background_executor().clone();
 
-        // Start periodic UI refresh while sync is running
-        // This provides optimistic updates as messages are stored
-        cx.spawn(async move |this, cx| {
-            loop {
-                // Wait 500ms between refreshes
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(500))
-                    .await;
+        // Shared flag to indicate fetch is still running
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fetch_active = Arc::new(AtomicBool::new(true));
+        let fetch_active_for_process = fetch_active.clone();
 
-                // Check if still syncing
-                let still_syncing = cx
-                    .update(|cx| {
-                        this.update(cx, |app, cx| {
-                            if app.is_syncing {
-                                // Refresh thread list with new data
-                                if let Some(thread_list) = &app.thread_list_view {
-                                    thread_list.update(cx, |view, cx| view.load_threads(cx));
-                                }
-                                cx.notify();
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
+        // Spawn fetch phase in background (doesn't block)
+        let store_for_fetch = store.clone();
+        let search_index_for_fetch = search_index.clone();
+        let background_for_fetch = background.clone();
 
-                if !still_syncing {
-                    break;
+        cx.spawn(async move |_this, _cx| {
+            debug!("[SYNC] Starting fetch phase in background...");
+            let options = SyncOptions {
+                search_index: search_index_for_fetch,
+                ..Default::default()
+            };
+            let mut stats = SyncStats::default();
+
+            let result = background_for_fetch
+                .spawn(async move {
+                    fetch_phase(&client, store_for_fetch.as_ref(), &options, &mut stats)
+                })
+                .await;
+
+            // Mark fetch as complete
+            fetch_active.store(false, Ordering::SeqCst);
+
+            match result {
+                Ok(fetch_stats) => {
+                    debug!("[SYNC] Fetch phase complete: {} fetched, {} pending",
+                        fetch_stats.fetched, fetch_stats.pending);
+                }
+                Err(e) => {
+                    error!("[SYNC] Fetch phase failed: {}", e);
                 }
             }
         })
         .detach();
 
-        // Run sync on background thread (it's blocking I/O)
-        let background = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            // Execute sync on background thread pool
-            let result = background
-                .spawn(async move {
-                    let options = SyncOptions {
-                        max_messages: None,
-                        full_resync: false,
-                        search_index,
-                        ..Default::default()
-                    };
-                    sync_gmail(&client, store.as_ref(), "default", options)
-                })
-                .await;
+        // Spawn process phase - runs concurrently, processes messages as they become available
+        let store_for_process = store.clone();
+        let search_index_for_process = search_index.clone();
 
+        cx.spawn(async move |this, cx| {
+            debug!("[SYNC] Starting process phase (concurrent with fetch)...");
+            let options = SyncOptions {
+                search_index: search_index_for_process,
+                ..Default::default()
+            };
+            let mut stats = SyncStats::default();
+            let batch_size = 100;
+
+            loop {
+                let store_for_batch = store_for_process.clone();
+                let options_clone = options.clone();
+                let mut batch_stats = stats.clone();
+
+                // Process one batch on background thread
+                let batch_result = background
+                    .spawn(async move {
+                        process_pending_batch(
+                            store_for_batch.as_ref(),
+                            &options_clone,
+                            &mut batch_stats,
+                            batch_size,
+                        ).map(|result| (result, batch_stats))
+                    })
+                    .await;
+
+                match batch_result {
+                    Ok((result, updated_stats)) => {
+                        stats = updated_stats;
+                        let processed = result.processed;
+                        let remaining = result.remaining;
+                        let fetch_still_running = fetch_active_for_process.load(Ordering::SeqCst);
+
+                        if processed > 0 {
+                            // Update UI with new data
+                            cx.update(|cx| {
+                                this.update(cx, |app, cx| {
+                                    if let Some(thread_list) = &app.thread_list_view {
+                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                    }
+                                    debug!("[SYNC] Processed {} messages, {} remaining (fetch active: {})",
+                                        processed, remaining, fetch_still_running);
+                                    cx.notify();
+                                })
+                            }).ok();
+                        } else {
+                            // No messages processed this batch
+                            if remaining == 0 && !fetch_still_running {
+                                // Fetch is done and no pending messages - we're complete
+                                debug!("[SYNC] No more pending messages and fetch complete");
+                                break;
+                            }
+
+                            // Wait a bit before checking again
+                            gpui::Timer::after(std::time::Duration::from_millis(250)).await;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Process batch failed: {}", e);
+                        cx.update(|cx| {
+                            this.update(cx, |app, cx| {
+                                app.sync_error = Some(format!("Process failed: {}", e));
+                                cx.notify();
+                            })
+                        }).ok();
+                        break;
+                    }
+                }
+            }
+
+            // Sync complete
             cx.update(|cx| {
                 this.update(cx, |app, cx| {
                     app.is_syncing = false;
-                    match result {
-                        Ok(stats) => {
-                            let sync_type = if stats.was_incremental {
-                                "incremental"
-                            } else {
-                                "initial"
-                            };
-                            info!(
-                                "Sync complete ({}): {} fetched, {} created, {} skipped in {}ms",
-                                sync_type,
-                                stats.messages_fetched,
-                                stats.messages_created,
-                                stats.messages_skipped,
-                                stats.duration_ms
-                            );
-                            // Update last sync timestamp
-                            app.last_sync_at = Some(Utc::now());
-                            // Final reload of thread list
-                            if let Some(thread_list) = &app.thread_list_view {
-                                thread_list.update(cx, |view, cx| view.load_threads(cx));
-                            }
-                        }
-                        Err(e) => {
-                            error!("Sync failed: {}", e);
-                            app.sync_error = Some(format!("{}", e));
-                        }
+                    app.last_sync_at = Some(Utc::now());
+
+                    info!(
+                        "Sync complete: {} created, {} skipped",
+                        stats.messages_created,
+                        stats.messages_skipped,
+                    );
+
+                    // Final reload
+                    if let Some(thread_list) = &app.thread_list_view {
+                        thread_list.update(cx, |view, cx| view.load_threads(cx));
                     }
                     cx.notify();
                 })
-            })
+            }).ok();
         })
         .detach();
     }

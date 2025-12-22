@@ -12,4 +12,4 @@ mod traits;
 pub use self::heed::HeedMailStore;
 pub use memory::InMemoryMailStore;
 pub use persistent::RedbMailStore;
-pub use traits::MailStore;
+pub use traits::{MailStore, PendingMessage};

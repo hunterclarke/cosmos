@@ -182,23 +182,317 @@ impl GmailClient {
         Ok(message)
     }
 
-    /// Get multiple messages in parallel with retry logic
+    /// Get multiple messages using Gmail Batch API
     ///
-    /// Uses rayon for parallel fetching to significantly speed up bulk downloads.
-    /// Progress callback receives (completed_count, total_count).
+    /// Uses the batch endpoint to combine up to 100 requests per HTTP call,
+    /// dramatically reducing network overhead compared to individual requests.
     ///
     /// # Arguments
     /// * `ids` - The message IDs to fetch
     pub fn get_messages_batch(&self, ids: &[MessageId]) -> Vec<Result<GmailMessage>> {
-        self.get_messages_batch_parallel(ids, |_, _| {})
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        let access_token = match self.auth.get_access_token() {
+            Ok(token) => token,
+            Err(e) => {
+                let err_msg = format!("Failed to get access token: {}", e);
+                return ids
+                    .iter()
+                    .map(|_| Err(anyhow::anyhow!("{}", err_msg)))
+                    .collect();
+            }
+        };
+
+        let total = ids.len();
+        // Gmail batch API max is 100 requests per batch
+        let batch_size = 100;
+        let num_batches = (total + batch_size - 1) / batch_size;
+
+        info!(
+            "Fetching {} messages via batch API ({} batches of up to {})",
+            total, num_batches, batch_size
+        );
+
+        // Results indexed by original position
+        let mut results: Vec<Option<Result<GmailMessage>>> =
+            (0..total).map(|_| None).collect();
+
+        // Adaptive rate limiting: adjust delay based on rate limit feedback
+        // Start with small delay, increase on rate limits, decrease on success
+        let mut inter_batch_delay_ms = 200u64; // Start conservative
+        let mut backoff_ms = 0u64; // Extra backoff when rate limited
+
+        for (batch_idx, chunk) in ids.chunks(batch_size).enumerate() {
+            let chunk_start = batch_idx * batch_size;
+
+            // Track which indices in this chunk still need fetching
+            let mut pending: Vec<(usize, &MessageId)> = chunk.iter().enumerate().collect();
+            let mut retry_count = 0u32;
+
+            // Keep retrying until all messages succeed - sync must be complete
+            while !pending.is_empty() {
+                // Apply delays: inter-batch delay + any backoff from rate limiting
+                let total_delay = if backoff_ms > 0 {
+                    backoff_ms
+                } else if retry_count == 0 && batch_idx > 0 {
+                    inter_batch_delay_ms
+                } else {
+                    0
+                };
+
+                if total_delay > 0 {
+                    if backoff_ms > 0 {
+                        info!(
+                            "[BATCH] Rate limited ({} pending), backing off {}ms (retry {})",
+                            pending.len(),
+                            total_delay,
+                            retry_count
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(total_delay));
+                }
+
+                // Fetch pending messages
+                let pending_ids: Vec<MessageId> =
+                    pending.iter().map(|(_, id)| (*id).clone()).collect();
+                let batch_results =
+                    self.fetch_batch(&access_token, &pending_ids, batch_idx + 1, num_batches);
+
+                // Process results, separating successes from rate limits
+                let mut next_pending = Vec::new();
+                for ((chunk_idx, id), result) in pending.into_iter().zip(batch_results) {
+                    let is_rate_limited = result
+                        .as_ref()
+                        .is_err_and(|e| e.to_string().contains("429"));
+
+                    if is_rate_limited {
+                        next_pending.push((chunk_idx, id));
+                    } else {
+                        results[chunk_start + chunk_idx] = Some(result);
+                    }
+                }
+
+                if next_pending.is_empty() {
+                    // Success - reset backoff and try to speed up slightly
+                    backoff_ms = 0;
+                    if retry_count == 0 {
+                        // No rate limits this batch, try going faster (min 50ms)
+                        inter_batch_delay_ms = inter_batch_delay_ms.saturating_sub(25).max(50);
+                    }
+                } else {
+                    // Rate limited - slow down for future batches and back off now
+                    inter_batch_delay_ms = (inter_batch_delay_ms + 100).min(1000);
+                    backoff_ms = if backoff_ms == 0 {
+                        500
+                    } else {
+                        (backoff_ms * 2).min(16000)
+                    };
+                    retry_count += 1;
+                }
+
+                pending = next_pending;
+            }
+        }
+
+        info!("Batch fetch complete: {} messages", total);
+        results
+            .into_iter()
+            .map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("Missing result"))))
+            .collect()
     }
 
-    /// Get multiple messages in parallel with progress reporting
+    /// Fetch a batch of messages using Gmail's batch endpoint
+    fn fetch_batch(
+        &self,
+        access_token: &str,
+        ids: &[MessageId],
+        batch_num: usize,
+        total_batches: usize,
+    ) -> Vec<Result<GmailMessage>> {
+        use log::debug;
+        use std::io::Read;
+
+        let boundary = format!("batch_{}", std::process::id());
+
+        // Build multipart request body
+        let mut body = String::new();
+        for (i, id) in ids.iter().enumerate() {
+            body.push_str(&format!("--{}\r\n", boundary));
+            body.push_str("Content-Type: application/http\r\n");
+            body.push_str(&format!("Content-ID: <msg{}>\r\n", i));
+            body.push_str("\r\n");
+            body.push_str(&format!(
+                "GET /gmail/v1/users/me/messages/{}?format=full\r\n",
+                id.as_str()
+            ));
+            body.push_str("\r\n");
+        }
+        body.push_str(&format!("--{}--\r\n", boundary));
+
+        debug!(
+            "[BATCH] Sending batch {}/{} with {} messages",
+            batch_num, total_batches, ids.len()
+        );
+
+        // Send batch request
+        let response = ureq::post("https://www.googleapis.com/batch/gmail/v1")
+            .header("Authorization", &format!("Bearer {}", access_token))
+            .header(
+                "Content-Type",
+                &format!("multipart/mixed; boundary={}", boundary),
+            )
+            .send(body.as_bytes());
+
+        match response {
+            Ok(mut resp) => {
+                // Get response content type to extract boundary
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+
+                // Read full response body
+                let mut response_body = String::new();
+                if let Err(e) = resp.body_mut().as_reader().read_to_string(&mut response_body) {
+                    return ids
+                        .iter()
+                        .map(|_| Err(anyhow::anyhow!("Failed to read batch response: {}", e)))
+                        .collect();
+                }
+
+                // Parse multipart response
+                self.parse_batch_response(&content_type, &response_body, ids)
+            }
+            Err(e) => {
+                // Return error for all messages in this batch
+                ids.iter()
+                    .map(|_| Err(anyhow::anyhow!("Batch request failed: {}", e)))
+                    .collect()
+            }
+        }
+    }
+
+    /// Parse a multipart batch response from Gmail
+    fn parse_batch_response(
+        &self,
+        content_type: &str,
+        body: &str,
+        ids: &[MessageId],
+    ) -> Vec<Result<GmailMessage>> {
+        use log::{debug, warn};
+
+        // Extract boundary from content type
+        let boundary = content_type
+            .split("boundary=")
+            .nth(1)
+            .map(|s| s.trim())
+            .unwrap_or("");
+
+        if boundary.is_empty() {
+            return ids
+                .iter()
+                .map(|_| Err(anyhow::anyhow!("No boundary in batch response")))
+                .collect();
+        }
+
+        let mut results: Vec<Result<GmailMessage>> = Vec::with_capacity(ids.len());
+        let delimiter = format!("--{}", boundary);
+        let parts: Vec<&str> = body.split(&delimiter).collect();
+
+        // Skip first (empty) and last (closing --) parts
+        for part in parts.iter().skip(1) {
+            if part.starts_with("--") || part.trim().is_empty() {
+                continue;
+            }
+
+            // Structure of each part:
+            // 1. Part headers (Content-Type: application/http, Content-ID: ...)
+            // 2. Blank line
+            // 3. HTTP status line (HTTP/1.1 200 OK)
+            // 4. HTTP headers
+            // 5. Blank line
+            // 6. JSON body
+            //
+            // We need to find the JSON body which starts after the SECOND blank line
+
+            // Find the start of JSON by looking for opening brace
+            if let Some(json_start) = part.find('{') {
+                // Find matching closing brace by counting braces
+                let json_slice = &part[json_start..];
+                let mut brace_count = 0;
+                let mut json_end = 0;
+
+                for (i, c) in json_slice.char_indices() {
+                    match c {
+                        '{' => brace_count += 1,
+                        '}' => {
+                            brace_count -= 1;
+                            if brace_count == 0 {
+                                json_end = i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if json_end > 0 {
+                    let json = &json_slice[..json_end];
+                    let json_trimmed = json.trim();
+
+                    // Check for error response - error JSON has "error" as the first/only key
+                    // Handle various formatting: {"error", { "error", {\n  "error", etc.
+                    let is_error = {
+                        // Remove leading { and whitespace, check if starts with "error"
+                        let after_brace = json_trimmed.strip_prefix('{').unwrap_or("");
+                        let trimmed = after_brace.trim_start();
+                        trimmed.starts_with("\"error\"")
+                    };
+                    if is_error {
+                        if json.contains("429") || json.contains("Too many") {
+                            results.push(Err(anyhow::anyhow!("Rate limited (429)")));
+                        } else {
+                            let preview: String = json.chars().take(100).collect();
+                            warn!("Gmail API error: {}", preview);
+                            results.push(Err(anyhow::anyhow!("API error")));
+                        }
+                        continue;
+                    }
+
+                    match serde_json::from_str::<GmailMessage>(json) {
+                        Ok(msg) => results.push(Ok(msg)),
+                        Err(e) => {
+                            // Log first 200 chars of JSON for debugging
+                            let preview: String = json.chars().take(200).collect();
+                            debug!("Failed JSON preview: {}", preview);
+                            warn!("Failed to parse message JSON: {}", e);
+                            results.push(Err(anyhow::anyhow!("Failed to parse message: {}", e)));
+                        }
+                    }
+                } else {
+                    results.push(Err(anyhow::anyhow!("Malformed JSON in batch response")));
+                }
+            }
+        }
+
+        // If we didn't get enough results, fill with errors
+        while results.len() < ids.len() {
+            results.push(Err(anyhow::anyhow!("Missing response in batch")));
+        }
+
+        results
+    }
+
+    /// Get multiple messages in parallel with progress reporting (legacy method)
     ///
-    /// # Arguments
-    /// * `ids` - The message IDs to fetch
-    /// * `progress` - Callback called with (completed, total) after each message
-    pub fn get_messages_batch_parallel<F>(
+    /// Uses individual requests with rayon parallelism. Prefer get_messages_batch()
+    /// which uses the batch API for better performance.
+    #[allow(dead_code)]
+    fn get_messages_parallel<F>(
         &self,
         ids: &[MessageId],
         progress: F,
