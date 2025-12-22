@@ -13,7 +13,11 @@ use mail::{
 };
 use std::sync::Arc;
 
-use crate::components::{SearchBox, SearchBoxEvent};
+use crate::components::{SearchBox, SearchBoxEvent, ShortcutsHelp};
+use crate::input::{
+    CloseOverlay, GoToAllMail, GoToDrafts, GoToInbox, GoToSent, GoToStarred, GoToTrash,
+    ShowShortcuts,
+};
 use wry::WebViewBuilder;
 
 use crate::components::Sidebar;
@@ -34,6 +38,13 @@ pub enum View {
         thread_id: ThreadId,
     },
     Search,
+}
+
+/// What view should receive focus on next render
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PendingFocus {
+    ThreadList,
+    ThreadView,
 }
 
 /// Root application state
@@ -65,6 +76,12 @@ pub struct OrionApp {
     search_results_view: Option<Entity<SearchResultsView>>,
     /// Flag to focus search results on next render (after submit)
     pending_focus_results: bool,
+    /// What view should receive focus on next render
+    pending_focus: Option<PendingFocus>,
+    /// Whether to show keyboard shortcuts help overlay
+    show_shortcuts_help: bool,
+    /// Pending G-sequence (waiting for second key)
+    pending_g_sequence: bool,
 }
 
 impl OrionApp {
@@ -78,7 +95,7 @@ impl OrionApp {
 
         // Create thread list view with empty store (will be populated after DB loads)
         let store_clone = store.clone();
-        let thread_list_view = cx.new(|_| ThreadListView::new(store_clone));
+        let thread_list_view = cx.new(|cx| ThreadListView::new(store_clone, cx));
         debug!("[BOOT]   ThreadListView created: {:?}", new_start.elapsed());
 
         Self {
@@ -99,6 +116,9 @@ impl OrionApp {
             search_box: None,
             search_results_view: None,
             pending_focus_results: false,
+            pending_focus: Some(PendingFocus::ThreadList), // Focus thread list on launch
+            show_shortcuts_help: false,
+            pending_g_sequence: false,
         }
     }
 
@@ -549,13 +569,15 @@ impl OrionApp {
     pub fn show_inbox(&mut self, cx: &mut Context<Self>) {
         if self.thread_list_view.is_none() {
             let store = self.store.clone();
-            self.thread_list_view = Some(cx.new(|_| ThreadListView::new(store)));
+            self.thread_list_view = Some(cx.new(|cx| ThreadListView::new(store, cx)));
         }
         // Hide the WebView when not viewing a thread
         self.hide_webview(cx);
         // Clean up thread view
         self.thread_view = None;
         self.current_view = View::Inbox;
+        // Focus thread list on next render
+        self.pending_focus = Some(PendingFocus::ThreadList);
         cx.notify();
     }
 
@@ -588,7 +610,7 @@ impl OrionApp {
         let app_handle = cx.entity().clone();
         let thread_id_clone = thread_id.clone();
         self.thread_view = Some(cx.new(|cx| {
-            let mut view = ThreadView::new(store, thread_id.clone());
+            let mut view = ThreadView::new(store, thread_id.clone(), cx);
             view.set_app(app_handle);
             view.load_thread(cx);
             view
@@ -597,6 +619,8 @@ impl OrionApp {
             html: thread_html.clone(),
             thread_id: thread_id_clone.clone(),
         };
+        // Focus thread view on next render
+        self.pending_focus = Some(PendingFocus::ThreadView);
         cx.notify();
 
         // Mark thread as read in background
@@ -639,6 +663,8 @@ impl OrionApp {
         if let Some(thread_list) = &self.thread_list_view {
             thread_list.update(cx, |view, cx| view.set_label_filter(label_id, cx));
         }
+        // Focus thread list on next render
+        self.pending_focus = Some(PendingFocus::ThreadList);
         cx.notify();
     }
 
@@ -1000,6 +1026,101 @@ impl OrionApp {
     fn handle_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_search(window, cx);
     }
+
+    fn handle_show_shortcuts(
+        &mut self,
+        _: &ShowShortcuts,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_shortcuts_help = !self.show_shortcuts_help;
+        cx.notify();
+    }
+
+    fn handle_close_overlay(
+        &mut self,
+        _: &CloseOverlay,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.show_shortcuts_help {
+            self.show_shortcuts_help = false;
+            cx.notify();
+        }
+    }
+
+    // Go-to folder handlers
+    fn handle_go_to_inbox(&mut self, _: &GoToInbox, _window: &mut Window, cx: &mut Context<Self>) {
+        self.select_label(LabelId::INBOX.to_string(), cx);
+    }
+
+    fn handle_go_to_starred(
+        &mut self,
+        _: &GoToStarred,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_label(LabelId::STARRED.to_string(), cx);
+    }
+
+    fn handle_go_to_sent(&mut self, _: &GoToSent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.select_label(LabelId::SENT.to_string(), cx);
+    }
+
+    fn handle_go_to_drafts(
+        &mut self,
+        _: &GoToDrafts,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_label(LabelId::DRAFTS.to_string(), cx);
+    }
+
+    fn handle_go_to_trash(&mut self, _: &GoToTrash, _window: &mut Window, cx: &mut Context<Self>) {
+        self.select_label(LabelId::TRASH.to_string(), cx);
+    }
+
+    fn handle_go_to_all_mail(
+        &mut self,
+        _: &GoToAllMail,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_label("ALL".to_string(), cx);
+    }
+
+    /// Handle G-sequence key events
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // If waiting for G-sequence second key
+        if self.pending_g_sequence {
+            self.pending_g_sequence = false;
+
+            match event.keystroke.key.as_str() {
+                "i" => self.select_label(LabelId::INBOX.to_string(), cx),
+                "s" => self.select_label(LabelId::STARRED.to_string(), cx),
+                "t" => self.select_label(LabelId::SENT.to_string(), cx),
+                "d" => self.select_label(LabelId::DRAFTS.to_string(), cx),
+                "a" => self.select_label("ALL".to_string(), cx),
+                // # key for trash (shift+3)
+                _ => {} // Ignore other keys
+            }
+            cx.notify();
+            return;
+        }
+
+        // Check for G key to start sequence (no modifiers)
+        let mods = &event.keystroke.modifiers;
+        let no_modifiers = !mods.shift && !mods.control && !mods.alt && !mods.platform;
+        if event.keystroke.key == "g" && no_modifiers {
+            self.pending_g_sequence = true;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for OrionApp {
@@ -1014,20 +1135,84 @@ impl Render for OrionApp {
             }
         }
 
+        // Handle pending focus from navigation
+        if let Some(pending_focus) = self.pending_focus.take() {
+            match pending_focus {
+                PendingFocus::ThreadList => {
+                    if let Some(ref thread_list) = self.thread_list_view {
+                        thread_list.update(cx, |view, cx| {
+                            view.focus(window, cx);
+                        });
+                    }
+                }
+                PendingFocus::ThreadView => {
+                    if let Some(ref thread_view) = self.thread_view {
+                        thread_view.update(cx, |view, cx| {
+                            view.focus(window, cx);
+                        });
+                    }
+                }
+            }
+        }
+
         let theme = cx.theme();
         // Clone theme colors upfront to avoid borrow conflicts
         let bg = theme.background;
         let fg = theme.foreground;
         let secondary_bg = theme.secondary;
         let border = theme.border;
+        let g_indicator_bg = theme.secondary;
+        let g_indicator_fg = theme.foreground;
 
         let sidebar = self.render_sidebar(cx);
         let search_box = self.get_or_create_search_box(window, cx);
         let content = self.render_content(window, cx);
 
+        // G-sequence indicator
+        let g_sequence_indicator = if self.pending_g_sequence {
+            Some(
+                div()
+                    .absolute()
+                    .bottom_4()
+                    .right_4()
+                    .px_3()
+                    .py_2()
+                    .bg(g_indicator_bg)
+                    .rounded_md()
+                    .shadow_md()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(g_indicator_fg)
+                    .child("G..."),
+            )
+        } else {
+            None
+        };
+
+        // Shortcuts help overlay - hide webview when showing overlay
+        let shortcuts_overlay = if self.show_shortcuts_help {
+            // Hide webview so it doesn't appear above the overlay
+            if let Some(ref webview) = self.webview {
+                webview.update(cx, |wv, _| wv.hide());
+            }
+            Some(ShortcutsHelp::new())
+        } else {
+            None
+        };
+
         div()
             .key_context("OrionApp")
             .on_action(cx.listener(Self::handle_focus_search))
+            .on_action(cx.listener(Self::handle_show_shortcuts))
+            .on_action(cx.listener(Self::handle_close_overlay))
+            .on_action(cx.listener(Self::handle_go_to_inbox))
+            .on_action(cx.listener(Self::handle_go_to_starred))
+            .on_action(cx.listener(Self::handle_go_to_sent))
+            .on_action(cx.listener(Self::handle_go_to_drafts))
+            .on_action(cx.listener(Self::handle_go_to_trash))
+            .on_action(cx.listener(Self::handle_go_to_all_mail))
+            .on_key_down(cx.listener(Self::handle_key_down))
+            .relative()
             .flex()
             .flex_row()
             .size_full()
@@ -1066,5 +1251,9 @@ impl Render for OrionApp {
                     // Content area
                     .child(div().flex().flex_1().overflow_hidden().child(content)),
             )
+            // G-sequence indicator
+            .children(g_sequence_indicator)
+            // Shortcuts help overlay
+            .children(shortcuts_overlay)
     }
 }

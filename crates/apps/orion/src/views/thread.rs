@@ -5,11 +5,11 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize};
 
-use crate::assets::icons::{Archive, MailOpen};
-use mail::{MailStore, ThreadDetail, ThreadId, get_thread_detail};
-use std::sync::Arc;
-
 use crate::app::OrionApp;
+use crate::assets::icons::{Archive, MailOpen};
+use crate::input::{self, GoBack, ToggleRead, ToggleStar, Trash};
+use mail::{get_thread_detail, MailStore, ThreadDetail, ThreadId};
+use std::sync::Arc;
 
 /// Thread view showing messages in a conversation
 ///
@@ -22,10 +22,11 @@ pub struct ThreadView {
     is_loading: bool,
     error_message: Option<String>,
     app: Option<Entity<OrionApp>>,
+    focus_handle: FocusHandle,
 }
 
 impl ThreadView {
-    pub fn new(store: Arc<dyn MailStore>, thread_id: ThreadId) -> Self {
+    pub fn new(store: Arc<dyn MailStore>, thread_id: ThreadId, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             thread_id,
@@ -33,7 +34,13 @@ impl ThreadView {
             is_loading: false,
             error_message: None,
             app: None,
+            focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// Focus this view for keyboard input
+    pub fn focus(&self, window: &mut Window, _cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
     }
 
     /// Set the parent app entity for navigation
@@ -45,6 +52,43 @@ impl ThreadView {
         if let Some(app) = &self.app {
             app.update(cx, |app, cx| {
                 app.show_inbox(cx);
+            });
+        }
+    }
+
+    // Action handlers for keyboard shortcuts
+    fn handle_go_back(&mut self, _: &GoBack, _window: &mut Window, cx: &mut Context<Self>) {
+        self.go_back(cx);
+    }
+
+    fn handle_archive(&mut self, _: &input::Archive, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.archive_current_thread(cx);
+            });
+        }
+    }
+
+    fn handle_toggle_star(&mut self, _: &ToggleStar, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.toggle_star_current_thread(cx);
+            });
+        }
+    }
+
+    fn handle_toggle_read(&mut self, _: &ToggleRead, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.toggle_read_current_thread(cx);
+            });
+        }
+    }
+
+    fn handle_trash(&mut self, _: &Trash, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            app.update(cx, |app, cx| {
+                app.trash_current_thread(cx);
             });
         }
     }
@@ -215,6 +259,15 @@ impl ThreadView {
 impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // ThreadView only renders the header; the app manages the WebView for message content
-        self.render_header(cx)
+        // Wrap in a div with key context for keyboard shortcuts
+        div()
+            .key_context("ThreadView")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::handle_go_back))
+            .on_action(cx.listener(Self::handle_archive))
+            .on_action(cx.listener(Self::handle_toggle_star))
+            .on_action(cx.listener(Self::handle_toggle_read))
+            .on_action(cx.listener(Self::handle_trash))
+            .child(self.render_header(cx))
     }
 }

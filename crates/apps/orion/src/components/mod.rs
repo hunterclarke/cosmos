@@ -2,10 +2,12 @@
 
 pub mod search_box;
 mod search_result_item;
+mod shortcuts_help;
 mod sidebar;
 mod thread_list_item;
 
 pub use search_box::{SearchBox, SearchBoxEvent};
 pub use search_result_item::SearchResultItem;
+pub use shortcuts_help::ShortcutsHelp;
 pub use sidebar::{Sidebar, SidebarItem};
 pub use thread_list_item::ThreadListItem;
