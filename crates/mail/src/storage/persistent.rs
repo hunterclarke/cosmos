@@ -30,13 +30,23 @@ pub struct RedbMailStore {
 
 impl RedbMailStore {
     /// Create a new persistent store at the given path
+    ///
+    /// If the database already exists, opens it without re-initializing tables (faster).
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let db = Database::create(path.as_ref())
-            .with_context(|| format!("Failed to create database at {:?}", path.as_ref()))?;
+        let path = path.as_ref();
+
+        // Fast path: if database already exists, just open it (skips table init)
+        if path.exists() {
+            return Self::open(path);
+        }
+
+        // Slow path: create new database and initialize tables
+        let db = Database::create(path)
+            .with_context(|| format!("Failed to create database at {:?}", path))?;
 
         let store = Self { db: Arc::new(db) };
 
-        // Initialize tables
+        // Initialize tables (only needed for new databases)
         store.init_tables()?;
 
         Ok(store)

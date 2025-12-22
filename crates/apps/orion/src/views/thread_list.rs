@@ -3,8 +3,8 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::scroll::Scrollbar;
-use gpui_component::spinner::Spinner;
-use gpui_component::{v_virtual_list, ActiveTheme, Sizable, Size as ComponentSize, VirtualListScrollHandle};
+use gpui_component::skeleton::Skeleton;
+use gpui_component::{v_virtual_list, ActiveTheme, VirtualListScrollHandle};
 use log::{debug, error, info};
 use mail::{list_threads, list_threads_by_label, MailStore, ThreadId, ThreadSummary};
 use std::rc::Rc;
@@ -22,6 +22,8 @@ pub struct ThreadListView {
     threads: Vec<ThreadSummary>,
     selected_thread: Option<ThreadId>,
     is_loading: bool,
+    /// True while waiting for persistent storage to load in background
+    is_store_loading: bool,
     error_message: Option<String>,
     app: Option<Entity<OrionApp>>,
     scroll_handle: VirtualListScrollHandle,
@@ -37,6 +39,7 @@ impl ThreadListView {
             threads: Vec::new(),
             selected_thread: None,
             is_loading: false,
+            is_store_loading: true, // Start in loading state until real store is set
             error_message: None,
             app: None,
             scroll_handle: VirtualListScrollHandle::new(),
@@ -48,6 +51,12 @@ impl ThreadListView {
     /// Set the parent app entity for navigation
     pub fn set_app(&mut self, app: Entity<OrionApp>) {
         self.app = Some(app);
+    }
+
+    /// Update the store (called when persistent storage finishes loading)
+    pub fn set_store(&mut self, store: Arc<dyn MailStore>) {
+        self.store = store;
+        self.is_store_loading = false;
     }
 
     /// Set the label filter and reload threads
@@ -161,23 +170,37 @@ impl ThreadListView {
             )
     }
 
-    fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_skeleton(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
+        // Render skeleton thread items
         div()
             .flex()
-            .flex_1()
             .flex_col()
-            .justify_center()
-            .items_center()
-            .gap_2()
-            .child(Spinner::new().with_size(ComponentSize::Medium))
-            .child(
+            .flex_1()
+            .bg(theme.list)
+            .children((0..8).map(|_| {
                 div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Loading..."),
-            )
+                    .h(px(THREAD_ITEM_HEIGHT))
+                    .w_full()
+                    .px_4()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    // Skeleton for sender + subject line
+                    .child(
+                        div()
+                            .flex()
+                            .gap_3()
+                            .child(Skeleton::new().w(px(120.)).h(px(16.)))
+                            .child(Skeleton::new().flex_1().h(px(16.))),
+                    )
+                    // Skeleton for snippet line
+                    .child(Skeleton::new().w(px(280.)).h(px(14.)))
+            }))
     }
 
     fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -284,8 +307,8 @@ impl Render for ThreadListView {
             .size_full()
             .bg(theme.background)
             .child(self.render_header(cx))
-            .child(if self.is_loading {
-                self.render_loading(cx).into_any_element()
+            .child(if self.is_store_loading || self.is_loading {
+                self.render_skeleton(cx).into_any_element()
             } else if let Some(ref error) = self.error_message.clone() {
                 self.render_error(error, cx).into_any_element()
             } else if self.threads.is_empty() {

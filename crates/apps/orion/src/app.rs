@@ -6,7 +6,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::webview::WebView;
 use gpui_component::{ActiveTheme, Sizable};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use mail::{
     GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SearchIndex, SyncOptions,
     ThreadId, sync_gmail,
@@ -65,40 +65,17 @@ pub struct OrionApp {
 
 impl OrionApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Create persistent storage in the config directory
-        let store: Arc<dyn MailStore> = match Self::create_persistent_store() {
-            Ok(store) => Arc::new(store),
-            Err(e) => {
-                warn!(
-                    "Failed to create persistent storage: {}, using in-memory",
-                    e
-                );
-                Arc::new(mail::InMemoryMailStore::new())
-            }
-        };
+        use std::time::Instant;
+        let new_start = Instant::now();
 
-        // Load last sync timestamp from sync state
-        let last_sync_at = store
-            .get_sync_state("default")
-            .ok()
-            .flatten()
-            .map(|state| state.last_sync_at);
+        // Start with in-memory store for instant startup
+        let store: Arc<dyn MailStore> = Arc::new(mail::InMemoryMailStore::new());
+        debug!("[BOOT]   InMemoryMailStore created: {:?}", new_start.elapsed());
 
-        // Create thread list view - we'll set the app handle after construction
+        // Create thread list view with empty store (will be populated after DB loads)
         let store_clone = store.clone();
         let thread_list_view = cx.new(|_| ThreadListView::new(store_clone));
-
-        // Create search index
-        let search_index = match Self::create_search_index() {
-            Ok(index) => {
-                info!("Search index opened successfully");
-                Some(Arc::new(index))
-            }
-            Err(e) => {
-                warn!("Failed to create search index: {}", e);
-                None
-            }
-        };
+        debug!("[BOOT]   ThreadListView created: {:?}", new_start.elapsed());
 
         Self {
             current_view: View::Inbox,
@@ -106,18 +83,85 @@ impl OrionApp {
             gmail_client: None,
             is_syncing: false,
             sync_error: None,
-            last_sync_at,
+            last_sync_at: None,
             thread_list_view: Some(thread_list_view),
             thread_view: None,
             labels: Sidebar::default_labels(),
             selected_label: LabelId::INBOX.to_string(),
             webview: None,
             webview_loaded_html: None,
-            search_index,
+            search_index: None,
             search_box: None,
             search_results_view: None,
             pending_focus_results: false,
         }
+    }
+
+    /// Load persistent storage in the background
+    /// Call this after the UI is displayed for deferred loading
+    pub fn load_persistent_storage(&mut self, cx: &mut Context<Self>) {
+        let background = cx.background_executor().clone();
+
+        cx.spawn(async move |this, cx| {
+            // Load database and search index on background thread
+            let result = background
+                .spawn(async move {
+                    use std::time::Instant;
+                    let start = Instant::now();
+
+                    let store: Arc<dyn MailStore> = match Self::create_persistent_store() {
+                        Ok(store) => Arc::new(store),
+                        Err(e) => {
+                            warn!("Failed to create persistent storage: {}, using in-memory", e);
+                            return Err(e);
+                        }
+                    };
+                    debug!("[BOOT]   RedbMailStore opened (background): {:?}", start.elapsed());
+
+                    let last_sync_at = store
+                        .get_sync_state("default")
+                        .ok()
+                        .flatten()
+                        .map(|state| state.last_sync_at);
+
+                    let search_index = match Self::create_search_index() {
+                        Ok(index) => {
+                            debug!("[BOOT]   SearchIndex opened (background): {:?}", start.elapsed());
+                            Some(Arc::new(index))
+                        }
+                        Err(e) => {
+                            warn!("Failed to create search index: {}", e);
+                            None
+                        }
+                    };
+
+                    Ok((store, last_sync_at, search_index))
+                })
+                .await;
+
+            // Update app state on main thread
+            if let Ok((store, last_sync_at, search_index)) = result {
+                cx.update(|cx| {
+                    this.update(cx, |app, cx| {
+                        app.store = store.clone();
+                        app.last_sync_at = last_sync_at;
+                        app.search_index = search_index;
+
+                        // Update thread list view with the real store
+                        if let Some(thread_list) = &app.thread_list_view {
+                            thread_list.update(cx, |view, cx| {
+                                view.set_store(store);
+                                view.load_threads(cx);
+                            });
+                        }
+
+                        info!("Persistent storage loaded");
+                        cx.notify();
+                    })
+                }).ok();
+            }
+        })
+        .detach();
     }
 
     /// Create search index in the config directory
