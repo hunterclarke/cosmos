@@ -31,9 +31,7 @@ pub enum View {
         /// Pre-generated HTML for the thread (generated on navigation, not during render)
         html: String,
     },
-    Search {
-        query: String,
-    },
+    Search,
 }
 
 /// Root application state
@@ -275,7 +273,7 @@ impl OrionApp {
         // Hide WebView and switch to search view
         self.hide_webview(cx);
         self.thread_view = None;
-        self.current_view = View::Search { query };
+        self.current_view = View::Search;
         cx.notify();
     }
 
@@ -619,7 +617,7 @@ impl OrionApp {
         let (html_content, thread_entity, is_search) = match &self.current_view {
             View::Inbox => (None, None, false),
             View::Thread { html } => (Some(html.clone()), self.thread_view.clone(), false),
-            View::Search { .. } => (None, None, true),
+            View::Search => (None, None, true),
         };
 
         // Search results view

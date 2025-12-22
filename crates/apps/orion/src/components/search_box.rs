@@ -12,7 +12,8 @@ pub enum SearchBoxEvent {
     QueryChanged(String),
     /// Enter pressed - submit search
     Submitted(String),
-    /// Search cleared
+    /// Search cleared (reserved for future use)
+    #[allow(dead_code)]
     Cleared,
     /// Escape pressed - cancel search
     Cancelled,
@@ -69,7 +70,8 @@ impl SearchBox {
         self.input_state.read(cx).text().to_string()
     }
 
-    /// Set the query text
+    /// Set the query text (reserved for future use)
+    #[allow(dead_code)]
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let query_owned = query.to_string();
         self.input_state.update(cx, |state, cx| {
@@ -78,7 +80,8 @@ impl SearchBox {
         self.last_emitted_query = query.to_string();
     }
 
-    /// Clear the search box
+    /// Clear the search box (reserved for future use)
+    #[allow(dead_code)]
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input_state.update(cx, |state, cx| {
             state.set_value("", window, cx);
