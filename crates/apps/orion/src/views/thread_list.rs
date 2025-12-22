@@ -4,9 +4,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::scroll::Scrollbar;
 use gpui_component::skeleton::Skeleton;
-use gpui_component::{v_virtual_list, ActiveTheme, VirtualListScrollHandle};
+use gpui_component::{ActiveTheme, VirtualListScrollHandle, v_virtual_list};
 use log::{debug, error, info};
-use mail::{list_threads, list_threads_by_label, MailStore, ThreadId, ThreadSummary};
+use mail::{MailStore, ThreadId, ThreadSummary, list_threads, list_threads_by_label};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -265,7 +265,7 @@ impl ThreadListView {
 
         match result {
             Ok(threads) => {
-                info!("Loaded {} threads", threads.len());
+                debug!("Loaded {} threads", threads.len());
 
                 // Update item sizes for virtual list
                 self.item_sizes = Rc::new(

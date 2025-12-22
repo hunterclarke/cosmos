@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bundle Orion as a macOS application
+# Requires: cargo-bundle (install with: cargo install cargo-bundle)
+
+cd "$(dirname "$0")/.."
+
+echo "Building Orion release..."
+cargo build --release -p orion
+
+echo "Creating macOS app bundle..."
+cargo bundle --release --package orion --format osx
+
+APP_PATH="target/release/bundle/osx/Orion.app"
+RESOURCES_PATH="$APP_PATH/Contents/Resources"
+ORION_ASSETS="crates/apps/orion/assets"
+
+if [[ -d "$APP_PATH" ]]; then
+    echo "Copying resources..."
+    mkdir -p "$RESOURCES_PATH"
+
+    # Copy icon
+    if [[ -f "$ORION_ASSETS/icon.icns" ]]; then
+        cp "$ORION_ASSETS/icon.icns" "$RESOURCES_PATH/"
+    fi
+
+    # Copy assets folder
+    if [[ -d "$ORION_ASSETS" ]]; then
+        cp -r "$ORION_ASSETS" "$RESOURCES_PATH/"
+    fi
+
+    # Update Info.plist to reference the icon
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string icon.icns" "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile icon.icns" "$APP_PATH/Contents/Info.plist"
+
+    echo ""
+    echo "Successfully created: $APP_PATH"
+    echo ""
+    echo "To install, drag to /Applications or run:"
+    echo "  cp -r \"$APP_PATH\" /Applications/"
+else
+    echo "Error: App bundle was not created"
+    exit 1
+fi
