@@ -285,6 +285,62 @@ StyledText::new("Hello World").with_highlights(highlights)
 
 Do NOT use `TextRun` directly - it requires complex Font setup.
 
+**Custom Assets Pipeline:**
+
+Orion extends gpui-component's bundled assets with custom Lucide icons. The asset system uses `rust-embed` to embed SVG files at compile time.
+
+**Directory structure:**
+```
+crates/apps/orion/
+├── assets/
+│   └── icons/           # Custom Lucide SVG icons
+│       ├── archive.svg
+│       ├── mail-open.svg
+│       └── refresh-cw.svg
+└── src/
+    └── assets.rs        # Asset source + custom icon types
+```
+
+**Adding a new custom icon:**
+
+1. Download the SVG from [Lucide](https://lucide.dev/) and place it in `assets/icons/`
+2. Add an icon struct in `src/assets.rs`:
+
+```rust
+// In src/assets.rs, inside the `icons` module
+#[derive(Clone, Copy)]
+pub struct MyIcon;
+
+impl IconNamed for MyIcon {
+    fn path(self) -> SharedString {
+        "icons/my-icon.svg".into()
+    }
+}
+```
+
+3. Use the icon in views:
+
+```rust
+use crate::assets::icons::MyIcon;
+use gpui_component::Icon;
+
+Icon::new(MyIcon)
+    .with_size(ComponentSize::Small)
+    .text_color(theme.foreground)
+```
+
+**How it works:**
+
+- `OrionAssets` implements `AssetSource` and is registered via `Application::new().with_assets(OrionAssets)`
+- When loading assets, it first checks `CustomIcons` (rust-embed) for paths starting with `icons/`
+- Falls back to `gpui_component_assets::Assets` for standard gpui-component icons
+- Custom icon structs implement `IconNamed` trait, returning the asset path
+
+**Available custom icons:**
+- `Archive` - Box with down arrow (archive action)
+- `MailOpen` - Open envelope (read/unread toggle)
+- `RefreshCw` - Circular arrows (sync button)
+
 ## Cosmos Integration
 
 The `mail` crate uses trait abstractions for storage:
