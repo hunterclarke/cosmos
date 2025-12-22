@@ -8,10 +8,9 @@ use gpui::actions;
 actions!(
     orion,
     [
-        MoveUp,      // K or Up arrow - select previous item
-        MoveDown,    // J or Down arrow - select next item
+        MoveUp,       // K or Up arrow - select previous item
+        MoveDown,     // J or Down arrow - select next item
         OpenSelected, // Enter - open selected thread
-        GoBack,      // Escape - go back to list
     ]
 );
 
@@ -44,6 +43,9 @@ actions!(
     orion,
     [
         ShowShortcuts, // ? - show keyboard shortcuts help
-        CloseOverlay,  // Escape - close any overlay
+        /// Dismiss current context and ascend to parent view.
+        /// Hierarchy: Thread → List (search/inbox) → Inbox
+        /// Also closes overlays (shortcuts modal).
+        Dismiss,
     ]
 );

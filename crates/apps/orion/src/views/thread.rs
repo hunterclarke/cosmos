@@ -7,7 +7,7 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize
 
 use crate::app::OrionApp;
 use crate::assets::icons::{Archive, MailOpen};
-use crate::input::{self, GoBack, ToggleRead, ToggleStar, Trash};
+use crate::input::{self, ToggleRead, ToggleStar, Trash};
 use mail::{get_thread_detail, MailStore, ThreadDetail, ThreadId};
 use std::sync::Arc;
 
@@ -48,19 +48,16 @@ impl ThreadView {
         self.app = Some(app);
     }
 
-    fn go_back(&mut self, cx: &mut Context<Self>) {
+    /// Dismiss this thread view (back button click)
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
         if let Some(app) = &self.app {
             app.update(cx, |app, cx| {
-                app.show_inbox(cx);
+                app.dismiss(cx);
             });
         }
     }
 
     // Action handlers for keyboard shortcuts
-    fn handle_go_back(&mut self, _: &GoBack, _window: &mut Window, cx: &mut Context<Self>) {
-        self.go_back(cx);
-    }
-
     fn handle_archive(&mut self, _: &input::Archive, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(app) = &self.app {
             app.update(cx, |app, cx| {
@@ -149,7 +146,7 @@ impl ThreadView {
                     .ghost()
                     .cursor_pointer()
                     .on_click(cx.listener(|view, _event, _window, cx| {
-                        view.go_back(cx);
+                        view.dismiss(cx);
                     })),
             )
             // Subject and message count
@@ -260,10 +257,10 @@ impl Render for ThreadView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // ThreadView only renders the header; the app manages the WebView for message content
         // Wrap in a div with key context for keyboard shortcuts
+        // Note: Escape is handled at OrionApp level via Dismiss action
         div()
             .key_context("ThreadView")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::handle_go_back))
             .on_action(cx.listener(Self::handle_archive))
             .on_action(cx.listener(Self::handle_toggle_star))
             .on_action(cx.listener(Self::handle_toggle_read))

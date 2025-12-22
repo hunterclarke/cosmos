@@ -15,8 +15,7 @@ use std::sync::Arc;
 
 use crate::components::{SearchBox, SearchBoxEvent, ShortcutsHelp};
 use crate::input::{
-    CloseOverlay, GoToAllMail, GoToDrafts, GoToInbox, GoToSent, GoToStarred, GoToTrash,
-    ShowShortcuts,
+    Dismiss, GoToAllMail, GoToDrafts, GoToInbox, GoToSent, GoToStarred, GoToTrash, ShowShortcuts,
 };
 use wry::WebViewBuilder;
 
@@ -45,6 +44,16 @@ pub enum View {
 pub enum PendingFocus {
     ThreadList,
     ThreadView,
+}
+
+/// The list context from which a thread was opened.
+/// Used to determine where Dismiss should return to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ListContext {
+    /// Thread was opened from the inbox/label thread list
+    Inbox,
+    /// Thread was opened from search results
+    Search,
 }
 
 /// Root application state
@@ -82,6 +91,8 @@ pub struct OrionApp {
     show_shortcuts_help: bool,
     /// Pending G-sequence (waiting for second key)
     pending_g_sequence: bool,
+    /// The list context from which the current thread was opened
+    thread_list_context: ListContext,
 }
 
 impl OrionApp {
@@ -119,6 +130,7 @@ impl OrionApp {
             pending_focus: Some(PendingFocus::ThreadList), // Focus thread list on launch
             show_shortcuts_help: false,
             pending_g_sequence: false,
+            thread_list_context: ListContext::Inbox,
         }
     }
 
@@ -576,6 +588,7 @@ impl OrionApp {
         // Clean up thread view
         self.thread_view = None;
         self.current_view = View::Inbox;
+        self.thread_list_context = ListContext::Inbox;
         // Focus thread list on next render
         self.pending_focus = Some(PendingFocus::ThreadList);
         cx.notify();
@@ -583,6 +596,12 @@ impl OrionApp {
 
     /// Navigate to thread view
     pub fn show_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+        // Track which list context we're coming from
+        self.thread_list_context = match self.current_view {
+            View::Search => ListContext::Search,
+            _ => ListContext::Inbox,
+        };
+
         // Load thread data and generate HTML upfront (not during render)
         let store = self.store.clone();
         let theme = cx.theme();
@@ -1037,16 +1056,46 @@ impl OrionApp {
         cx.notify();
     }
 
-    fn handle_close_overlay(
-        &mut self,
-        _: &CloseOverlay,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Dismiss current context and ascend view hierarchy.
+    /// Priority: Overlay → Thread → Search → Inbox (no-op)
+    pub fn dismiss(&mut self, cx: &mut Context<Self>) {
+        // First priority: close any overlay
         if self.show_shortcuts_help {
             self.show_shortcuts_help = false;
             cx.notify();
+            return;
         }
+
+        // Second: dismiss based on current view hierarchy
+        match &self.current_view {
+            View::Thread { .. } => {
+                // Thread → List (based on where thread was opened from)
+                self.hide_webview(cx);
+                self.thread_view = None;
+                match self.thread_list_context {
+                    ListContext::Search => {
+                        self.current_view = View::Search;
+                        self.pending_focus_results = true;
+                        cx.notify();
+                    }
+                    ListContext::Inbox => {
+                        self.show_inbox(cx);
+                    }
+                }
+            }
+            View::Search => {
+                // Search → Inbox
+                self.search_results_view = None;
+                self.show_inbox(cx);
+            }
+            View::Inbox => {
+                // Already at top level, no-op
+            }
+        }
+    }
+
+    fn handle_dismiss(&mut self, _: &Dismiss, _window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss(cx);
     }
 
     // Go-to folder handlers
@@ -1106,7 +1155,7 @@ impl OrionApp {
                 "t" => self.select_label(LabelId::SENT.to_string(), cx),
                 "d" => self.select_label(LabelId::DRAFTS.to_string(), cx),
                 "a" => self.select_label("ALL".to_string(), cx),
-                // # key for trash (shift+3)
+                "#" | "3" => self.select_label(LabelId::TRASH.to_string(), cx),
                 _ => {} // Ignore other keys
             }
             cx.notify();
@@ -1204,7 +1253,7 @@ impl Render for OrionApp {
             .key_context("OrionApp")
             .on_action(cx.listener(Self::handle_focus_search))
             .on_action(cx.listener(Self::handle_show_shortcuts))
-            .on_action(cx.listener(Self::handle_close_overlay))
+            .on_action(cx.listener(Self::handle_dismiss))
             .on_action(cx.listener(Self::handle_go_to_inbox))
             .on_action(cx.listener(Self::handle_go_to_starred))
             .on_action(cx.listener(Self::handle_go_to_sent))

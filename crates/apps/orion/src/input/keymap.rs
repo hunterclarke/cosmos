@@ -26,7 +26,8 @@ pub fn bindings() -> Vec<KeyBinding> {
     vec![
         // ===== Global (OrionApp context) =====
         KeyBinding::new("?", ShowShortcuts, Some("OrionApp")),
-        KeyBinding::new("escape", CloseOverlay, Some("OrionApp")),
+        // Dismiss: closes overlays, or ascends view hierarchy (Thread → List → Inbox)
+        KeyBinding::new("escape", Dismiss, Some("OrionApp")),
         KeyBinding::new("/", FocusSearch, Some("OrionApp")),
         KeyBinding::new("cmd-k", FocusSearch, Some("OrionApp")),
         // ===== Search box =====
@@ -52,7 +53,6 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("u", ToggleRead, Some("ThreadListView")),
         KeyBinding::new("shift-3", Trash, Some("ThreadListView")), // # key
         // ===== Thread detail (ThreadView context) =====
-        KeyBinding::new("escape", GoBack, Some("ThreadView")),
         KeyBinding::new("e", Archive, Some("ThreadView")),
         KeyBinding::new("s", ToggleStar, Some("ThreadView")),
         KeyBinding::new("u", ToggleRead, Some("ThreadView")),

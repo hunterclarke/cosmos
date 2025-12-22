@@ -7,9 +7,11 @@
 - [x] Apply/remove labels
 - [x] Star/unstar messages
 - [ ] Add toast notifications for actions
-- [ ] Add keyboard shortcuts help overlay
+- [x] Add keyboard shortcuts help overlay
 - [ ] Add command palette (`Cmd+K`)
 - [ ] Multi-account support
 - [ ] Attachments + blob storage
 - [ ] Compose email
 - [ ] Reply to email
+- [ ] Scroll on keyboard up/down nav
+- [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)

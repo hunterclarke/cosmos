@@ -56,11 +56,9 @@ impl SearchResultsView {
         self.app = Some(app);
     }
 
-    /// Focus the search results view and select first item
-    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Focus the search results view (preserves current selection)
+    pub fn focus(&self, window: &mut Window, _cx: &mut Context<Self>) {
         self.focus_handle.focus(window);
-        self.selected_index = 0;
-        cx.notify();
     }
 
     /// Execute search with the given query
@@ -110,6 +108,12 @@ impl SearchResultsView {
 
     /// Move selection up
     pub fn select_prev(&mut self, cx: &mut Context<Self>) {
+        if self.results.is_empty() {
+            return;
+        }
+        // Clamp to valid range (results may have changed)
+        let max_index = self.results.len().saturating_sub(1);
+        self.selected_index = self.selected_index.min(max_index);
         if self.selected_index > 0 {
             self.selected_index -= 1;
             cx.notify();
@@ -118,7 +122,13 @@ impl SearchResultsView {
 
     /// Move selection down
     pub fn select_next(&mut self, cx: &mut Context<Self>) {
-        if self.selected_index + 1 < self.results.len() {
+        if self.results.is_empty() {
+            return;
+        }
+        // Clamp to valid range (results may have changed)
+        let max_index = self.results.len().saturating_sub(1);
+        self.selected_index = self.selected_index.min(max_index);
+        if self.selected_index < max_index {
             self.selected_index += 1;
             cx.notify();
         }

@@ -65,7 +65,10 @@ impl ThreadListView {
         if self.threads.is_empty() {
             return;
         }
-        let new_index = match self.selected_index {
+        let max_index = self.threads.len() - 1;
+        // Clamp current index to valid range (list may have changed)
+        let current = self.selected_index.map(|i| i.min(max_index));
+        let new_index = match current {
             Some(i) if i > 0 => i - 1,
             Some(_) => 0, // Already at top
             None => 0,    // Select first item
@@ -81,10 +84,12 @@ impl ThreadListView {
             return;
         }
         let max_index = self.threads.len() - 1;
-        let new_index = match self.selected_index {
+        // Clamp current index to valid range (list may have changed)
+        let current = self.selected_index.map(|i| i.min(max_index));
+        let new_index = match current {
             Some(i) if i < max_index => i + 1,
-            Some(i) => i, // Already at bottom
-            None => 0,    // Select first item
+            Some(_) => max_index, // Already at bottom
+            None => 0,            // Select first item
         };
         self.selected_index = Some(new_index);
         self.selected_thread = Some(self.threads[new_index].id.clone());
@@ -215,6 +220,13 @@ impl ThreadListView {
     pub fn set_label_filter(&mut self, label: String, cx: &mut Context<Self>) {
         self.label_filter = Some(label);
         self.load_threads(cx);
+        // Reset selection to first item when changing label
+        self.selected_index = if self.threads.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.selected_thread = self.threads.first().map(|t| t.id.clone());
         cx.notify();
     }
 
