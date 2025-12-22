@@ -8,7 +8,7 @@ use gpui_component::webview::WebView;
 use gpui_component::{ActiveTheme, Sizable};
 use log::{debug, error, info, warn};
 use mail::{
-    GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SearchIndex, SyncOptions,
+    GmailAuth, GmailClient, HeedMailStore, Label, LabelId, MailStore, SearchIndex, SyncOptions,
     ThreadId, sync_gmail,
 };
 use std::sync::Arc;
@@ -116,7 +116,7 @@ impl OrionApp {
                             return Err(e);
                         }
                     };
-                    debug!("[BOOT]   RedbMailStore opened (background): {:?}", start.elapsed());
+                    debug!("[BOOT]   Database opened (background): {:?}", start.elapsed());
 
                     let last_sync_at = store
                         .get_sync_state("default")
@@ -223,15 +223,15 @@ impl OrionApp {
     }
 
     /// Create persistent storage in the config directory
-    fn create_persistent_store() -> anyhow::Result<RedbMailStore> {
+    fn create_persistent_store() -> anyhow::Result<HeedMailStore> {
         // Ensure config directory exists
         config::init()?;
 
-        // Get path for mail database
-        let db_path = config::config_path("mail.redb")
+        // Get path for mail database (LMDB uses a directory, not a file)
+        let db_path = config::config_path("mail.lmdb")
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
 
-        RedbMailStore::new(&db_path)
+        HeedMailStore::new(&db_path)
     }
 
     /// Wire up navigation by setting app handle on child views

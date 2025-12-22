@@ -12,6 +12,7 @@ anyhow = "1.0.100"
 base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 config = { version = "0.1.0", path = "../config" }
+heed3 = "0.22.0"
 log = "0.4.29"
 open = "5.3.3"
 rayon = "1.11.0"
