@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::app::OrionApp;
 use crate::components::ThreadListItem;
+use crate::input::{Archive, MoveDown, MoveUp, OpenSelected, ToggleRead, ToggleStar, Trash};
 
 /// Height of each thread list item (2 lines: subject, snippet + padding)
 const THREAD_ITEM_HEIGHT: f32 = 56.0;
@@ -21,6 +22,8 @@ pub struct ThreadListView {
     store: Arc<dyn MailStore>,
     threads: Vec<ThreadSummary>,
     selected_thread: Option<ThreadId>,
+    /// Index of currently selected item for keyboard navigation
+    selected_index: Option<usize>,
     is_loading: bool,
     /// True while waiting for persistent storage to load in background
     is_store_loading: bool,
@@ -30,14 +33,17 @@ pub struct ThreadListView {
     item_sizes: Rc<Vec<Size<Pixels>>>,
     /// Current label filter (e.g., "INBOX", "SENT", etc.)
     label_filter: Option<String>,
+    /// Focus handle for keyboard input
+    focus_handle: FocusHandle,
 }
 
 impl ThreadListView {
-    pub fn new(store: Arc<dyn MailStore>) -> Self {
+    pub fn new(store: Arc<dyn MailStore>, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             threads: Vec::new(),
             selected_thread: None,
+            selected_index: None,
             is_loading: false,
             is_store_loading: true, // Start in loading state until real store is set
             error_message: None,
@@ -45,7 +51,158 @@ impl ThreadListView {
             scroll_handle: VirtualListScrollHandle::new(),
             item_sizes: Rc::new(Vec::new()),
             label_filter: Some("INBOX".to_string()),
+            focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// Focus this view for keyboard input
+    pub fn focus(&self, window: &mut Window, _cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle);
+    }
+
+    /// Move selection up (previous item)
+    fn move_up(&mut self, cx: &mut Context<Self>) {
+        if self.threads.is_empty() {
+            return;
+        }
+        let max_index = self.threads.len() - 1;
+        // Clamp current index to valid range (list may have changed)
+        let current = self.selected_index.map(|i| i.min(max_index));
+        let new_index = match current {
+            Some(i) if i > 0 => i - 1,
+            Some(_) => 0, // Already at top
+            None => 0,    // Select first item
+        };
+        self.selected_index = Some(new_index);
+        self.selected_thread = Some(self.threads[new_index].id.clone());
+        cx.notify();
+    }
+
+    /// Move selection down (next item)
+    fn move_down(&mut self, cx: &mut Context<Self>) {
+        if self.threads.is_empty() {
+            return;
+        }
+        let max_index = self.threads.len() - 1;
+        // Clamp current index to valid range (list may have changed)
+        let current = self.selected_index.map(|i| i.min(max_index));
+        let new_index = match current {
+            Some(i) if i < max_index => i + 1,
+            Some(_) => max_index, // Already at bottom
+            None => 0,            // Select first item
+        };
+        self.selected_index = Some(new_index);
+        self.selected_thread = Some(self.threads[new_index].id.clone());
+        cx.notify();
+    }
+
+    /// Open the currently selected thread
+    fn open_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.selected_index {
+            if let Some(thread) = self.threads.get(index) {
+                let thread_id = thread.id.clone();
+                if let Some(app) = &self.app {
+                    app.update(cx, |app, cx| {
+                        app.show_thread(thread_id, cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Archive the selected thread
+    fn archive_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            if let Some(index) = self.selected_index {
+                if let Some(thread) = self.threads.get(index) {
+                    let thread_id = thread.id.clone();
+                    app.update(cx, |app, cx| {
+                        // Navigate to thread first so archive_current_thread works
+                        app.show_thread(thread_id, cx);
+                        app.archive_current_thread(cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Toggle star on selected thread
+    fn toggle_star_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            if let Some(index) = self.selected_index {
+                if let Some(thread) = self.threads.get(index) {
+                    let thread_id = thread.id.clone();
+                    app.update(cx, |app, cx| {
+                        app.show_thread(thread_id, cx);
+                        app.toggle_star_current_thread(cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Toggle read status on selected thread
+    fn toggle_read_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            if let Some(index) = self.selected_index {
+                if let Some(thread) = self.threads.get(index) {
+                    let thread_id = thread.id.clone();
+                    app.update(cx, |app, cx| {
+                        app.show_thread(thread_id, cx);
+                        app.toggle_read_current_thread(cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Trash the selected thread
+    fn trash_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some(app) = &self.app {
+            if let Some(index) = self.selected_index {
+                if let Some(thread) = self.threads.get(index) {
+                    let thread_id = thread.id.clone();
+                    app.update(cx, |app, cx| {
+                        app.show_thread(thread_id, cx);
+                        app.trash_current_thread(cx);
+                    });
+                }
+            }
+        }
+    }
+
+    // Action handlers
+    fn handle_move_up(&mut self, _: &MoveUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_up(cx);
+    }
+
+    fn handle_move_down(&mut self, _: &MoveDown, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_down(cx);
+    }
+
+    fn handle_open_selected(
+        &mut self,
+        _: &OpenSelected,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_selected(cx);
+    }
+
+    fn handle_archive(&mut self, _: &Archive, _window: &mut Window, cx: &mut Context<Self>) {
+        self.archive_selected(cx);
+    }
+
+    fn handle_toggle_star(&mut self, _: &ToggleStar, _window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_star_selected(cx);
+    }
+
+    fn handle_toggle_read(&mut self, _: &ToggleRead, _window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_read_selected(cx);
+    }
+
+    fn handle_trash(&mut self, _: &Trash, _window: &mut Window, cx: &mut Context<Self>) {
+        self.trash_selected(cx);
     }
 
     /// Set the parent app entity for navigation
@@ -63,6 +220,13 @@ impl ThreadListView {
     pub fn set_label_filter(&mut self, label: String, cx: &mut Context<Self>) {
         self.label_filter = Some(label);
         self.load_threads(cx);
+        // Reset selection to first item when changing label
+        self.selected_index = if self.threads.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.selected_thread = self.threads.first().map(|t| t.id.clone());
         cx.notify();
     }
 
@@ -254,6 +418,7 @@ impl ThreadListView {
 
     fn render_thread_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let selected_index = self.selected_index;
 
         div()
             .relative()
@@ -267,14 +432,12 @@ impl ThreadListView {
                     cx.entity().clone(),
                     "thread-list",
                     self.item_sizes.clone(),
-                    |view, visible_range, _window, cx| {
+                    move |view, visible_range, _window, cx| {
                         visible_range
                             .map(|ix| {
                                 let thread = view.threads[ix].clone();
-                                let is_selected = view
-                                    .selected_thread
-                                    .as_ref()
-                                    .is_some_and(|s| s.0 == thread.id.0);
+                                // Use selected_index for keyboard selection
+                                let is_selected = selected_index == Some(ix);
                                 let thread_id = thread.id.clone();
 
                                 div()
@@ -283,6 +446,7 @@ impl ThreadListView {
                                     .w_full()
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |view, _event, _window, cx| {
+                                        view.selected_index = Some(ix);
                                         view.select_thread(thread_id.clone(), cx);
                                     }))
                                     .child(ThreadListItem::new(thread, is_selected))
@@ -302,6 +466,15 @@ impl Render for ThreadListView {
         let theme = cx.theme();
 
         div()
+            .key_context("ThreadListView")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::handle_move_up))
+            .on_action(cx.listener(Self::handle_move_down))
+            .on_action(cx.listener(Self::handle_open_selected))
+            .on_action(cx.listener(Self::handle_archive))
+            .on_action(cx.listener(Self::handle_toggle_star))
+            .on_action(cx.listener(Self::handle_toggle_read))
+            .on_action(cx.listener(Self::handle_trash))
             .flex()
             .flex_col()
             .size_full()

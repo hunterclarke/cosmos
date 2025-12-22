@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{px, size, Application, KeyBinding, WindowOptions};
+use gpui::{px, size, Application, WindowOptions};
 use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use log::{debug, error, info, warn};
 use mail::GmailCredentials;
@@ -13,13 +13,12 @@ use mail::GmailCredentials;
 mod app;
 mod assets;
 mod components;
+mod input;
 mod templates;
 mod views;
 
-use app::{FocusSearch, OrionApp};
+use app::OrionApp;
 use assets::OrionAssets;
-use components::search_box;
-use views::search_results;
 
 fn main() {
     let startup_start = Instant::now();
@@ -48,20 +47,8 @@ fn main() {
         Theme::change(ThemeMode::Dark, None, cx);
         debug!("[BOOT] Theme set: {:?}", startup_start.elapsed());
 
-        // Register global keyboard shortcuts
-        cx.bind_keys([
-            // Focus search: / or Cmd+K
-            KeyBinding::new("/", FocusSearch, Some("OrionApp")),
-            KeyBinding::new("cmd-k", FocusSearch, Some("OrionApp")),
-            // Search box: Escape to cancel
-            KeyBinding::new("escape", search_box::Escape, Some("SearchBox")),
-            // Search results navigation
-            KeyBinding::new("k", search_results::SelectPrev, Some("SearchResultsView")),
-            KeyBinding::new("up", search_results::SelectPrev, Some("SearchResultsView")),
-            KeyBinding::new("j", search_results::SelectNext, Some("SearchResultsView")),
-            KeyBinding::new("down", search_results::SelectNext, Some("SearchResultsView")),
-            KeyBinding::new("enter", search_results::OpenSelected, Some("SearchResultsView")),
-        ]);
+        // Register keyboard shortcuts from input module
+        cx.bind_keys(input::bindings());
 
         let window_options = WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {

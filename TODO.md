@@ -1,25 +1,17 @@
 # TODO
 
-## Phase 3 Polish
-- [ ] Add `Cmd+F` global keybinding to focus search (currently only `/` works)
-- [ ] Add search suggestions/autocomplete (future)
-
-## Phase 4: Message Actions
-- [ ] Incremental sync should sync on all actions (read, delete, archive, etc.)
-- [ ] Mark as read/unread
-- [ ] Archive messages
-- [ ] Delete messages
-- [ ] Apply/remove labels
-- [ ] Star/unstar messages
-
-## UI Improvements
-- [ ] Add keyboard shortcuts help overlay
-- [ ] Add command palette (`Cmd+K`)
-- [ ] Improve loading states and error handling
+- [x] Incremental sync should sync on all actions (read, delete, archive, etc.)
+- [x] Mark as read/unread
+- [x] Archive messages
+- [x] Delete messages
+- [x] Apply/remove labels
+- [x] Star/unstar messages
 - [ ] Add toast notifications for actions
-
-## Future Phases
-- [ ] Attachments + blob storage (Phase 5)
-- [ ] Semantic search with embeddings (Phase 6)
-- [ ] AI agents - summaries, task extraction (Phase 7)
-- [ ] Multi-account support (Phase 8)
+- [x] Add keyboard shortcuts help overlay
+- [ ] Add command palette (`Cmd+K`)
+- [ ] Multi-account support
+- [ ] Attachments + blob storage
+- [ ] Compose email
+- [ ] Reply to email
+- [ ] Scroll on keyboard up/down nav
+- [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)
