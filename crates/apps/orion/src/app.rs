@@ -8,15 +8,20 @@ use gpui_component::webview::WebView;
 use gpui_component::{ActiveTheme, Sizable};
 use log::{error, info, warn};
 use mail::{
-    GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SyncOptions, ThreadId,
-    sync_gmail,
+    GmailAuth, GmailClient, Label, LabelId, MailStore, RedbMailStore, SearchIndex, SyncOptions,
+    ThreadId, sync_gmail,
 };
 use std::sync::Arc;
+
+use crate::components::{SearchBox, SearchBoxEvent};
 use wry::WebViewBuilder;
 
 use crate::components::Sidebar;
 use crate::templates;
-use crate::views::{ThreadListView, ThreadView};
+use crate::views::{SearchResultsView, ThreadListView, ThreadView};
+
+// Global actions for keyboard shortcuts
+actions!(orion, [FocusSearch]);
 
 /// Current view in the application
 #[derive(Clone)]
@@ -25,6 +30,9 @@ pub enum View {
     Thread {
         /// Pre-generated HTML for the thread (generated on navigation, not during render)
         html: String,
+    },
+    Search {
+        query: String,
     },
 }
 
@@ -47,6 +55,14 @@ pub struct OrionApp {
     webview: Option<Entity<WebView>>,
     /// Currently loaded WebView content (to avoid reloading on every render)
     webview_loaded_html: Option<String>,
+    /// Search index for full-text search
+    search_index: Option<Arc<SearchIndex>>,
+    /// Search box component
+    search_box: Option<Entity<SearchBox>>,
+    /// Search results view
+    search_results_view: Option<Entity<SearchResultsView>>,
+    /// Flag to focus search results on next render (after submit)
+    pending_focus_results: bool,
 }
 
 impl OrionApp {
@@ -74,6 +90,18 @@ impl OrionApp {
         let store_clone = store.clone();
         let thread_list_view = cx.new(|_| ThreadListView::new(store_clone));
 
+        // Create search index
+        let search_index = match Self::create_search_index() {
+            Ok(index) => {
+                info!("Search index opened successfully");
+                Some(Arc::new(index))
+            }
+            Err(e) => {
+                warn!("Failed to create search index: {}", e);
+                None
+            }
+        };
+
         Self {
             current_view: View::Inbox,
             store,
@@ -87,7 +115,23 @@ impl OrionApp {
             selected_label: LabelId::INBOX.to_string(),
             webview: None,
             webview_loaded_html: None,
+            search_index,
+            search_box: None,
+            search_results_view: None,
+            pending_focus_results: false,
         }
+    }
+
+    /// Create search index in the config directory
+    fn create_search_index() -> anyhow::Result<SearchIndex> {
+        // Ensure config directory exists
+        config::init()?;
+
+        // Get path for search index
+        let index_path = config::config_path("mail.search.idx")
+            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
+
+        SearchIndex::open(&index_path)
     }
 
     /// Get or create the shared WebView
@@ -153,6 +197,100 @@ impl OrionApp {
         if let Some(thread_list) = &self.thread_list_view {
             thread_list.update(cx, |view, _| view.set_app(app_handle.clone()));
         }
+    }
+
+    /// Get or create the search box
+    fn get_or_create_search_box(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SearchBox> {
+        if let Some(ref search_box) = self.search_box {
+            return search_box.clone();
+        }
+
+        let search_box = cx.new(|cx| SearchBox::new(window, cx));
+
+        // Subscribe to search box events
+        cx.subscribe(&search_box, Self::handle_search_box_event)
+            .detach();
+
+        self.search_box = Some(search_box.clone());
+        search_box
+    }
+
+    /// Handle events from the search box
+    fn handle_search_box_event(
+        &mut self,
+        _: Entity<SearchBox>,
+        event: &SearchBoxEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SearchBoxEvent::QueryChanged(query) => {
+                self.update_search(query.clone(), cx);
+            }
+            SearchBoxEvent::Submitted(query) => {
+                self.update_search(query.clone(), cx);
+                // Set flag to focus results on next render (when we have window access)
+                self.pending_focus_results = true;
+            }
+            SearchBoxEvent::Cleared => {
+                self.clear_search(cx);
+            }
+            SearchBoxEvent::Cancelled => {
+                self.clear_search(cx);
+            }
+        }
+    }
+
+    /// Update search results with a new query
+    fn update_search(&mut self, query: String, cx: &mut Context<Self>) {
+        if query.is_empty() {
+            self.clear_search(cx);
+            return;
+        }
+
+        // Create search results view if needed
+        if self.search_results_view.is_none() {
+            if let Some(ref index) = self.search_index {
+                let store = self.store.clone();
+                let index = index.clone();
+                let app_handle = cx.entity().clone();
+                self.search_results_view = Some(cx.new(|cx| {
+                    let mut view = SearchResultsView::new(store, index, cx);
+                    view.set_app(app_handle);
+                    view
+                }));
+            }
+        }
+
+        // Execute search
+        if let Some(ref results_view) = self.search_results_view {
+            results_view.update(cx, |view, cx| {
+                view.search(query.clone(), cx);
+            });
+        }
+
+        // Hide WebView and switch to search view
+        self.hide_webview(cx);
+        self.thread_view = None;
+        self.current_view = View::Search { query };
+        cx.notify();
+    }
+
+    /// Clear search and return to inbox
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_results_view = None;
+        self.show_inbox(cx);
+    }
+
+    /// Focus the search box
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let search_box = self.get_or_create_search_box(window, cx);
+        search_box.update(cx, |view, cx| {
+            view.focus(window, cx);
+        });
     }
 
     /// Initialize Gmail client with credentials
@@ -249,6 +387,7 @@ impl OrionApp {
         cx.notify();
 
         let store = self.store.clone();
+        let search_index = self.search_index.clone();
 
         // Start periodic UI refresh while sync is running
         // This provides optimistic updates as messages are stored
@@ -294,6 +433,7 @@ impl OrionApp {
                     let options = SyncOptions {
                         max_messages: None,
                         full_resync: false,
+                        search_index,
                         ..Default::default()
                     };
                     sync_gmail(&client, store.as_ref(), "default", options)
@@ -476,10 +616,23 @@ impl OrionApp {
         let muted_fg = theme.muted_foreground;
 
         // Extract data from current_view before any mutable borrows
-        let (html_content, thread_entity) = match &self.current_view {
-            View::Inbox => (None, None),
-            View::Thread { html } => (Some(html.clone()), self.thread_view.clone()),
+        let (html_content, thread_entity, is_search) = match &self.current_view {
+            View::Inbox => (None, None, false),
+            View::Thread { html } => (Some(html.clone()), self.thread_view.clone(), false),
+            View::Search { .. } => (None, None, true),
         };
+
+        // Search results view
+        if is_search {
+            if let Some(search_results) = &self.search_results_view {
+                return search_results.clone().into_any_element();
+            } else {
+                return div()
+                    .text_color(muted_fg)
+                    .child("Search not available")
+                    .into_any_element();
+            }
+        }
 
         // Inbox view
         if html_content.is_none() {
@@ -568,8 +721,24 @@ fn format_relative_time(ts: DateTime<Utc>) -> String {
     }
 }
 
+impl OrionApp {
+    fn handle_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_search(window, cx);
+    }
+}
+
 impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Handle pending focus on search results (from Enter key in search box)
+        if self.pending_focus_results {
+            self.pending_focus_results = false;
+            if let Some(ref results_view) = self.search_results_view {
+                results_view.update(cx, |view, cx| {
+                    view.focus(window, cx);
+                });
+            }
+        }
+
         let theme = cx.theme();
         // Clone theme colors upfront to avoid borrow conflicts
         let bg = theme.background;
@@ -578,9 +747,12 @@ impl Render for OrionApp {
         let border = theme.border;
 
         let sidebar = self.render_sidebar(cx);
+        let search_box = self.get_or_create_search_box(window, cx);
         let content = self.render_content(window, cx);
 
         div()
+            .key_context("OrionApp")
+            .on_action(cx.listener(Self::handle_focus_search))
             .flex()
             .flex_row()
             .size_full()
@@ -596,7 +768,28 @@ impl Render for OrionApp {
                     .border_color(border)
                     .child(sidebar),
             )
-            // Main content
-            .child(div().flex().flex_1().overflow_hidden().child(content))
+            // Main content area with header
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_hidden()
+                    // Header with search box (right-aligned)
+                    .child(
+                        div()
+                            .w_full()
+                            .px_4()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(border)
+                            .flex()
+                            .justify_end()
+                            .items_center()
+                            .child(search_box),
+                    )
+                    // Content area
+                    .child(div().flex().flex_1().overflow_hidden().child(content)),
+            )
     }
 }

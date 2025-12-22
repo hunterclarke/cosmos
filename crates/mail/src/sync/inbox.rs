@@ -7,9 +7,11 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use log::{info, warn};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::gmail::{normalize_message, GmailClient, HistoryExpiredError};
 use crate::models::{LabelId, Message, MessageId, SyncState, Thread, ThreadId};
+use crate::search::SearchIndex;
 use crate::storage::MailStore;
 
 /// Options for sync operation
@@ -21,6 +23,8 @@ pub struct SyncOptions {
     pub full_resync: bool,
     /// Filter by label ID (e.g., "INBOX") - for debugging
     pub label_filter: Option<String>,
+    /// Optional search index for incremental indexing during sync
+    pub search_index: Option<Arc<SearchIndex>>,
 }
 
 /// Statistics from a sync operation
@@ -89,7 +93,7 @@ pub fn sync_gmail(
         }
         // Complete sync state - try incremental
         Some(state) => {
-            match incremental_sync(gmail, store, account_id, &state) {
+            match incremental_sync(gmail, store, account_id, &state, &options) {
                 Ok(stats) => stats,
                 Err(e) if e.downcast_ref::<HistoryExpiredError>().is_some() => {
                     // History ID expired, fall back to full resync
@@ -190,12 +194,19 @@ fn initial_sync(
                             let is_new_thread = !store.has_thread(&thread_id)?;
 
                             // Store message immediately
-                            store.upsert_message(message)?;
+                            store.upsert_message(message.clone())?;
                             stats.messages_created += 1;
 
                             // Update thread (message is already in store, pass empty slice)
                             let thread = compute_thread(&thread_id, &[], store)?;
-                            store.upsert_thread(thread)?;
+                            store.upsert_thread(thread.clone())?;
+
+                            // Index for search if index is provided
+                            if let Some(ref index) = options.search_index {
+                                if let Err(e) = index.index_message(&message, &thread) {
+                                    warn!("Failed to index message {}: {}", message.id.as_str(), e);
+                                }
+                            }
 
                             // Track thread stats (only count once per batch)
                             if threads_seen_in_batch.insert(thread_id) {
@@ -215,6 +226,13 @@ fn initial_sync(
                         warn!("Failed to fetch message: {}", e);
                         stats.errors += 1;
                     }
+                }
+            }
+
+            // Commit search index after batch
+            if let Some(ref index) = options.search_index {
+                if let Err(e) = index.commit() {
+                    warn!("Failed to commit search index: {}", e);
                 }
             }
 
@@ -286,6 +304,7 @@ fn incremental_sync(
     store: &dyn MailStore,
     _account_id: &str,
     state: &SyncState,
+    options: &SyncOptions,
 ) -> Result<SyncStats> {
     let mut stats = SyncStats {
         was_incremental: true,
@@ -338,12 +357,19 @@ fn incremental_sync(
                     let is_new_thread = !store.has_thread(&thread_id)?;
 
                     // Store message immediately
-                    store.upsert_message(message)?;
+                    store.upsert_message(message.clone())?;
                     stats.messages_created += 1;
 
                     // Update thread (message is already in store, pass empty slice)
                     let thread = compute_thread(&thread_id, &[], store)?;
-                    store.upsert_thread(thread)?;
+                    store.upsert_thread(thread.clone())?;
+
+                    // Index for search if index is provided
+                    if let Some(ref index) = options.search_index {
+                        if let Err(e) = index.index_message(&message, &thread) {
+                            warn!("Failed to index message {}: {}", message.id.as_str(), e);
+                        }
+                    }
 
                     // Track thread stats (only count once)
                     if threads_seen.insert(thread_id) {
@@ -363,6 +389,13 @@ fn incremental_sync(
                 warn!("Failed to fetch message: {}", e);
                 stats.errors += 1;
             }
+        }
+    }
+
+    // Commit search index
+    if let Some(ref index) = options.search_index {
+        if let Err(e) = index.commit() {
+            warn!("Failed to commit search index: {}", e);
         }
     }
 
@@ -389,6 +422,7 @@ pub fn sync_inbox(
         max_messages: Some(max_messages),
         full_resync: false,
         label_filter: None,
+        search_index: None,
     };
 
     sync_gmail(gmail, store, "default", options)

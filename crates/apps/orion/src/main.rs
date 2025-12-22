@@ -3,8 +3,8 @@
 //! This is the main entry point for the Orion mail application.
 
 use gpui::prelude::*;
-use gpui::{px, size, Application, WindowOptions};
-use gpui_component::{Theme, ThemeMode, TitleBar};
+use gpui::{px, size, Application, KeyBinding, WindowOptions};
+use gpui_component::{Root, Theme, ThemeMode, TitleBar};
 use log::{error, info, warn};
 use mail::GmailCredentials;
 
@@ -13,7 +13,9 @@ mod components;
 mod templates;
 mod views;
 
-use app::OrionApp;
+use app::{FocusSearch, OrionApp};
+use components::search_box;
+use views::search_results;
 
 fn main() {
     // Initialize logging
@@ -33,6 +35,21 @@ fn main() {
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
 
+        // Register global keyboard shortcuts
+        cx.bind_keys([
+            // Focus search: / or Cmd+K
+            KeyBinding::new("/", FocusSearch, Some("OrionApp")),
+            KeyBinding::new("cmd-k", FocusSearch, Some("OrionApp")),
+            // Search box: Escape to cancel
+            KeyBinding::new("escape", search_box::Escape, Some("SearchBox")),
+            // Search results navigation
+            KeyBinding::new("k", search_results::SelectPrev, Some("SearchResultsView")),
+            KeyBinding::new("up", search_results::SelectPrev, Some("SearchResultsView")),
+            KeyBinding::new("j", search_results::SelectNext, Some("SearchResultsView")),
+            KeyBinding::new("down", search_results::SelectNext, Some("SearchResultsView")),
+            KeyBinding::new("enter", search_results::OpenSelected, Some("SearchResultsView")),
+        ]);
+
         let window_options = WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds {
                 origin: gpui::Point::default(),
@@ -42,8 +59,9 @@ fn main() {
             ..Default::default()
         };
 
-        cx.open_window(window_options, |_window, cx| {
-            cx.new(|cx| {
+        cx.open_window(window_options, |window, cx| {
+            // Create OrionApp as a child entity first
+            let app_entity = cx.new(|cx| {
                 let mut app = OrionApp::new(cx);
 
                 // Load Gmail credentials from config file or environment
@@ -68,17 +86,22 @@ fn main() {
                     }
                 }
 
-                // Wire up navigation by passing app entity to child views
-                let app_handle = cx.entity().clone();
+                app
+            });
+
+            // Wire up navigation
+            let app_handle = app_entity.clone();
+            app_entity.update(cx, |app, cx| {
                 app.wire_navigation(app_handle, cx);
 
                 // Load initial threads
                 if let Some(thread_list) = &app.thread_list_view {
                     thread_list.update(cx, |view, cx| view.load_threads(cx));
                 }
+            });
 
-                app
-            })
+            // Wrap in gpui-component Root (required for Input component)
+            cx.new(|cx| Root::new(app_entity, window, cx))
         })
         .expect("Failed to open window");
 

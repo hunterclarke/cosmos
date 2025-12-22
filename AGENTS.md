@@ -135,6 +135,7 @@ use mail::{
 - `storage/` - Storage trait abstractions with InMemoryMailStore and RedbMailStore
 - `sync/` - Idempotent sync engine with incremental sync support
 - `query/` - Query API for UI consumption
+- `search/` - Full-text search using Tantivy (Phase 3)
 - `config` - Gmail credential loading
 
 **Storage implementations:**
@@ -146,6 +147,22 @@ use mail::{
 - Incremental sync: Uses Gmail History API to fetch only new messages
 - Automatic fallback: Falls back to initial sync if history ID expires
 - Messages include label_ids for filtering by folder (Inbox, Sent, etc.)
+
+**Search (Phase 3):**
+- Uses Tantivy for full-text search (pure Rust, embedded)
+- Index stored at `~/.config/cosmos/mail.search.idx/`
+- Gmail-style operators: `from:`, `to:`, `subject:`, `is:unread`, `in:inbox`, `before:`, `after:`
+- Messages indexed during sync
+
+```rust
+use mail::{SearchIndex, search_threads, parse_query};
+
+// Open or create index
+let index = SearchIndex::open(&index_path)?;
+
+// Search
+let results = search_threads(&index, &store, "from:alice is:unread", 50)?;
+```
 
 **Important: The mail crate is fully synchronous.** It uses `ureq` (sync HTTP) and `std::fs` (sync file I/O) to be executor-agnostic. See `docs/async.md` for details.
 
@@ -240,6 +257,34 @@ gpui_component::init(cx);
 Theme::change(ThemeMode::Dark, None, cx);
 ```
 
+**IMPORTANT: Root Wrapper Requirement:**
+The `gpui-component` Input component requires the window root to be a `Root` element.
+Without this, the app will crash on startup. Wrap your app component:
+
+```rust
+use gpui_component::Root;
+
+// In window content closure
+cx.new(|cx| Root::new(app_entity, window, cx))
+```
+
+**Text Highlighting with StyledText:**
+For highlighting text (e.g., search matches), use GPUI's `StyledText` API:
+
+```rust
+use gpui::{StyledText, HighlightStyle, hsla};
+
+let highlight = HighlightStyle {
+    background_color: Some(hsla(50./360., 0.9, 0.5, 0.4)),
+    ..Default::default()
+};
+
+let highlights = vec![(0..5, highlight)];  // Highlight chars 0-5
+StyledText::new("Hello World").with_highlights(highlights)
+```
+
+Do NOT use `TextRun` directly - it requires complex Font setup.
+
 ## Cosmos Integration
 
 The `mail` crate uses trait abstractions for storage:
@@ -326,7 +371,8 @@ To use Gmail integration:
    - Follow device flow prompts in terminal
    - Token saved to `~/.config/cosmos/gmail-tokens.json`
 
-**Data files (Phase 2):**
+**Data files:**
 - `~/.config/cosmos/mail.redb` - Persistent mail storage (threads, messages, sync state)
+- `~/.config/cosmos/mail.search.idx/` - Tantivy search index directory (Phase 3)
 - `~/.config/cosmos/gmail-tokens.json` - OAuth tokens
 - `~/.config/cosmos/google-credentials.json` - OAuth client credentials
