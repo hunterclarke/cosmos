@@ -141,7 +141,7 @@ impl RenderOnce for SearchResultItem {
                         // Inner content with horizontal padding
                         div()
                             .px_3()
-                            .py_4()
+                            .py_2()
                             .flex()
                             .items_start()
                             .gap_2()
@@ -163,7 +163,7 @@ impl RenderOnce for SearchResultItem {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
+                                    .gap_px()
                                     .overflow_hidden()
                                     .min_w_0()
                                     .flex_1()
@@ -173,8 +173,7 @@ impl RenderOnce for SearchResultItem {
                                             .text_sm()
                                             .font_weight(subject_weight)
                                             .text_color(theme.foreground)
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .child(sender_display),
                                     )
                                     // Subject with highlighting
@@ -183,8 +182,7 @@ impl RenderOnce for SearchResultItem {
                                             .text_sm()
                                             .font_weight(subject_weight)
                                             .text_color(theme.foreground)
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .child(subject_styled),
                                     )
                                     // Snippet with highlighting
@@ -192,8 +190,7 @@ impl RenderOnce for SearchResultItem {
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .child(snippet_styled),
                                     ),
                             )

@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use rusqlite_migration::{Migrations, M};
+use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite_migration::{M, Migrations};
 
 use super::blob::BlobStore;
 use super::traits::{MailStore, MessageBody, MessageMetadata, PendingMessage};
@@ -254,8 +254,7 @@ impl SqliteMailStore {
 
     /// Load labels for a message
     fn load_labels(&self, conn: &Connection, message_id: &str) -> Result<Vec<String>> {
-        let mut stmt =
-            conn.prepare("SELECT label_id FROM message_labels WHERE message_id = ?")?;
+        let mut stmt = conn.prepare("SELECT label_id FROM message_labels WHERE message_id = ?")?;
 
         let labels = stmt
             .query_map([message_id], |row| row.get(0))?
@@ -303,7 +302,11 @@ impl SqliteMailStore {
     }
 
     /// Load a MessageMetadata from a row
-    fn load_message_metadata(&self, conn: &Connection, message_id: &str) -> Result<Option<MessageMetadata>> {
+    fn load_message_metadata(
+        &self,
+        conn: &Connection,
+        message_id: &str,
+    ) -> Result<Option<MessageMetadata>> {
         let row: Option<(
             String,
             String,
@@ -705,19 +708,12 @@ impl MailStore for SqliteMailStore {
     fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageMetadata>> {
         let conn = self.conn.lock().unwrap();
 
-        let mut stmt = conn.prepare(
-            "SELECT id FROM messages WHERE thread_id = ? ORDER BY received_at ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM messages WHERE thread_id = ? ORDER BY received_at ASC")?;
 
         let message_ids: Vec<String> = stmt
             .query_map([thread_id.as_str()], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
-
-        log::debug!(
-            "[STORE] list_messages_for_thread({}) found {} message IDs",
-            thread_id.as_str(),
-            message_ids.len()
-        );
 
         let mut messages = Vec::new();
         for id in &message_ids {
@@ -802,7 +798,15 @@ impl MailStore for SqliteMailStore {
                 "SELECT account_id, history_id, last_sync_at, sync_version, initial_sync_complete
                  FROM sync_state WHERE account_id = ?",
                 [account_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
 
@@ -950,7 +954,8 @@ impl MailStore for SqliteMailStore {
 
     fn delete_message(&self, message_id: &MessageId) -> Result<()> {
         // Delete blobs first
-        self.blob_store.delete_all_for_message(message_id.as_str())?;
+        self.blob_store
+            .delete_all_for_message(message_id.as_str())?;
 
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -1015,8 +1020,8 @@ impl MailStore for SqliteMailStore {
         )?;
 
         // Insert labels
-        let mut stmt = tx
-            .prepare("INSERT INTO pending_message_labels (message_id, label_id) VALUES (?, ?)")?;
+        let mut stmt =
+            tx.prepare("INSERT INTO pending_message_labels (message_id, label_id) VALUES (?, ?)")?;
         for label in &label_ids {
             stmt.execute(params![id.as_str(), label])?;
         }
@@ -1038,7 +1043,11 @@ impl MailStore for SqliteMailStore {
         Ok(count > 0)
     }
 
-    fn get_pending_messages(&self, label: Option<&str>, limit: usize) -> Result<Vec<PendingMessage>> {
+    fn get_pending_messages(
+        &self,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingMessage>> {
         let conn = self.conn.lock().unwrap();
 
         let messages: Vec<(String, Vec<u8>)> = if let Some(label) = label {
@@ -1117,10 +1126,7 @@ impl MailStore for SqliteMailStore {
     fn delete_pending_message(&self, id: &MessageId) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         // Labels are deleted via CASCADE
-        conn.execute(
-            "DELETE FROM pending_messages WHERE id = ?",
-            [id.as_str()],
-        )?;
+        conn.execute("DELETE FROM pending_messages WHERE id = ?", [id.as_str()])?;
         Ok(())
     }
 
@@ -1378,23 +1384,22 @@ mod tests {
 
         // Add 3 messages to the same thread
         for i in 1..=3 {
-            let msg = Message::builder(
-                MessageId::new(format!("m{}", i)),
-                ThreadId::new("t1"),
-            )
-            .from(EmailAddress::new(format!("sender{}@example.com", i)))
-            .subject(format!("Message {}", i))
-            .body_preview(format!("Preview {}", i))
-            .body_text(Some(format!("Body text {}", i)))
-            .body_html(Some(format!("<p>Body HTML {}</p>", i)))
-            .received_at(Utc::now() + chrono::Duration::seconds(i as i64))
-            .label_ids(vec!["INBOX".to_string()])
-            .build();
+            let msg = Message::builder(MessageId::new(format!("m{}", i)), ThreadId::new("t1"))
+                .from(EmailAddress::new(format!("sender{}@example.com", i)))
+                .subject(format!("Message {}", i))
+                .body_preview(format!("Preview {}", i))
+                .body_text(Some(format!("Body text {}", i)))
+                .body_html(Some(format!("<p>Body HTML {}</p>", i)))
+                .received_at(Utc::now() + chrono::Duration::seconds(i as i64))
+                .label_ids(vec!["INBOX".to_string()])
+                .build();
             store.upsert_message(msg).unwrap();
         }
 
         // list_messages_for_thread should return all 3
-        let metadata_list = store.list_messages_for_thread(&ThreadId::new("t1")).unwrap();
+        let metadata_list = store
+            .list_messages_for_thread(&ThreadId::new("t1"))
+            .unwrap();
         assert_eq!(
             metadata_list.len(),
             3,

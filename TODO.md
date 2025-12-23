@@ -15,3 +15,7 @@
 - [ ] Reply to email
 - [ ] Scroll on keyboard up/down nav
 - [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)
+- [ ] Sync improvements
+  - [ ] Try and minimize the rate limiting on initial sync
+  - [ ] Sync should be resilient to sleep/restart/etc
+- [ ] Sandbox thread html css
