@@ -1,7 +1,8 @@
 //! Storage trait definitions
 
-use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
+use crate::models::{EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 
 /// A raw message pending processing
 ///
@@ -15,6 +16,118 @@ pub struct PendingMessage {
     pub data: Vec<u8>,
     /// Label IDs from the message (for prioritization - e.g., INBOX first)
     pub label_ids: Vec<String>,
+}
+
+/// Message metadata without body content (for list views and fast queries)
+///
+/// This is a lightweight representation of a message that excludes the
+/// potentially large body_text and body_html fields. Use this for listing
+/// messages and only load full bodies when needed.
+#[derive(Debug, Clone)]
+pub struct MessageMetadata {
+    /// Gmail message ID
+    pub id: MessageId,
+    /// ID of the thread this message belongs to
+    pub thread_id: ThreadId,
+    /// Sender's email address
+    pub from: EmailAddress,
+    /// Recipients (To field)
+    pub to: Vec<EmailAddress>,
+    /// CC recipients
+    pub cc: Vec<EmailAddress>,
+    /// Subject line
+    pub subject: String,
+    /// Plain text preview of the body (snippet)
+    pub body_preview: String,
+    /// When the message was received
+    pub received_at: DateTime<Utc>,
+    /// Gmail's internal timestamp (milliseconds since epoch)
+    pub internal_date: i64,
+    /// Gmail label IDs (e.g., "INBOX", "SENT", "UNREAD")
+    pub label_ids: Vec<String>,
+    /// Whether plain text body exists in blob storage
+    pub has_body_text: bool,
+    /// Whether HTML body exists in blob storage
+    pub has_body_html: bool,
+}
+
+impl MessageMetadata {
+    /// Convert to a full Message by adding body content
+    pub fn with_body(self, body: MessageBody) -> Message {
+        Message {
+            id: self.id,
+            thread_id: self.thread_id,
+            from: self.from,
+            to: self.to,
+            cc: self.cc,
+            subject: self.subject,
+            body_preview: self.body_preview,
+            body_text: body.text,
+            body_html: body.html,
+            received_at: self.received_at,
+            internal_date: self.internal_date,
+            label_ids: self.label_ids,
+        }
+    }
+}
+
+impl From<&Message> for MessageMetadata {
+    fn from(msg: &Message) -> Self {
+        Self {
+            id: msg.id.clone(),
+            thread_id: msg.thread_id.clone(),
+            from: msg.from.clone(),
+            to: msg.to.clone(),
+            cc: msg.cc.clone(),
+            subject: msg.subject.clone(),
+            body_preview: msg.body_preview.clone(),
+            received_at: msg.received_at,
+            internal_date: msg.internal_date,
+            label_ids: msg.label_ids.clone(),
+            has_body_text: msg.body_text.is_some(),
+            has_body_html: msg.body_html.is_some(),
+        }
+    }
+}
+
+/// Message body content (loaded separately from metadata)
+#[derive(Debug, Clone, Default)]
+pub struct MessageBody {
+    /// Full plain text body content
+    pub text: Option<String>,
+    /// Full HTML body content
+    pub html: Option<String>,
+}
+
+impl MessageBody {
+    /// Create an empty body
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Create a body with just text
+    pub fn text(text: String) -> Self {
+        Self {
+            text: Some(text),
+            html: None,
+        }
+    }
+
+    /// Create a body with just HTML
+    pub fn html(html: String) -> Self {
+        Self {
+            text: None,
+            html: Some(html),
+        }
+    }
+
+    /// Create a body with both text and HTML
+    pub fn both(text: String, html: String) -> Self {
+        Self {
+            text: Some(text),
+            html: Some(html),
+        }
+    }
 }
 
 /// Trait for mail storage operations
@@ -34,8 +147,22 @@ pub trait MailStore: Send + Sync {
     /// Get a thread by ID
     fn get_thread(&self, id: &ThreadId) -> Result<Option<Thread>>;
 
-    /// Get a message by ID
+    /// Get a message by ID (includes body content)
+    ///
+    /// This loads the full message including body content from blob storage.
+    /// For list views, use `get_message_metadata` instead.
     fn get_message(&self, id: &MessageId) -> Result<Option<Message>>;
+
+    /// Get message metadata only (without body content)
+    ///
+    /// Fast operation that only reads from the database, not blob storage.
+    /// Use this for list views and when you don't need the full body.
+    fn get_message_metadata(&self, id: &MessageId) -> Result<Option<MessageMetadata>>;
+
+    /// Get just the body content for a message
+    ///
+    /// Use this when you already have metadata and just need the body.
+    fn get_message_body(&self, id: &MessageId) -> Result<Option<MessageBody>>;
 
     /// List threads, ordered by last_message_at descending
     fn list_threads(&self, limit: usize, offset: usize) -> Result<Vec<Thread>>;
@@ -49,8 +176,20 @@ pub trait MailStore: Send + Sync {
         offset: usize,
     ) -> Result<Vec<Thread>>;
 
-    /// List messages for a thread, ordered by received_at ascending
-    fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<Message>>;
+    /// List message metadata for a thread, ordered by received_at ascending
+    ///
+    /// Returns lightweight metadata without body content. Use this for
+    /// displaying message lists in a thread view.
+    fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageMetadata>>;
+
+    /// List full messages for a thread (with bodies), ordered by received_at ascending
+    ///
+    /// More expensive - loads body content from blob storage for each message.
+    /// Use this when you need to render full message content.
+    fn list_messages_for_thread_with_bodies(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<Message>>;
 
     /// Check if a message exists
     fn has_message(&self, id: &MessageId) -> Result<bool>;

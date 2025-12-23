@@ -89,7 +89,10 @@ pub fn list_threads_by_label(
     Ok(threads.into_iter().map(ThreadSummary::from).collect())
 }
 
-/// Get detailed thread information including all messages
+/// Get detailed thread information including all messages with bodies
+///
+/// This loads full message content including bodies from blob storage.
+/// For a lightweight view without bodies, use `list_messages_for_thread` directly.
 ///
 /// # Arguments
 /// * `store` - The storage backend
@@ -103,7 +106,8 @@ pub fn get_thread_detail(
         None => return Ok(None),
     };
 
-    let messages = store.list_messages_for_thread(thread_id)?;
+    // Load full messages with bodies for rendering
+    let messages = store.list_messages_for_thread_with_bodies(thread_id)?;
 
     Ok(Some(ThreadDetail { thread, messages }))
 }

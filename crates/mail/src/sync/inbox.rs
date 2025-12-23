@@ -13,7 +13,7 @@ use std::time::Instant;
 use crate::gmail::{api::GmailMessage, normalize_message, GmailClient, HistoryExpiredError};
 use crate::models::{LabelId, Message, MessageId, SyncState, Thread, ThreadId};
 use crate::search::SearchIndex;
-use crate::storage::MailStore;
+use crate::storage::{MailStore, MessageMetadata};
 
 /// Options for sync operation
 #[derive(Debug, Clone, Default)]
@@ -296,6 +296,15 @@ pub fn fetch_phase(
     stats: &mut SyncStats,
 ) -> Result<FetchPhaseStats> {
     debug!("[SYNC] >>> ENTERED fetch_phase <<<");
+
+    // Log current store state for debugging
+    let message_count = store.count_threads().unwrap_or(0);
+    let pending_count = store.count_pending_messages(None).unwrap_or(0);
+    info!(
+        "[SYNC] fetch_phase starting: {} threads in store, {} pending messages",
+        message_count, pending_count
+    );
+
     let mut fetch_stats = FetchPhaseStats {
         fetched: 0,
         pending: 0,
@@ -322,11 +331,18 @@ pub fn fetch_phase(
             }
         }
 
+        // Limit batch size if we have a max_messages constraint
+        let effective_batch_size = if let Some(max) = options.max_messages {
+            batch_size.min(max - total_listed)
+        } else {
+            batch_size
+        };
+
         // Fetch a page of message IDs
         debug!("[SYNC] Calling list_messages_with_label...");
         let list_start = Instant::now();
         let list_response = gmail.list_messages_with_label(
-            batch_size,
+            effective_batch_size,
             page_token.as_deref(),
             options.label_filter.as_deref(),
         )?;
@@ -363,6 +379,15 @@ pub fn fetch_phase(
         debug!("[SYNC] has_message checks ({} msgs): {:?}", message_refs.len(), has_msg_start.elapsed());
 
         stats.messages_fetched += message_refs.len();
+
+        info!(
+            "[SYNC] Batch {}: {} listed, {} to fetch, {} skipped (total skipped: {})",
+            batch_num,
+            message_refs.len(),
+            to_fetch.len(),
+            message_refs.len() - to_fetch.len(),
+            fetch_stats.skipped
+        );
 
         if !to_fetch.is_empty() {
             info!("Fetching {} new messages...", to_fetch.len());
@@ -500,14 +525,15 @@ pub fn process_pending_batch(
         let thread_id = message.thread_id.clone();
         let is_new_thread = !store.has_thread(&thread_id)?;
 
-        // Store message
+        // Compute thread first (including this new message)
+        // Must upsert thread BEFORE message due to FK constraint
+        let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+        store.upsert_thread(thread.clone())?;
+
+        // Now store message (thread exists, FK constraint satisfied)
         store.upsert_message(message.clone())?;
         stats.messages_created += 1;
         result.processed += 1;
-
-        // Compute and update thread
-        let thread = compute_thread(&thread_id, &[], store)?;
-        store.upsert_thread(thread.clone())?;
 
         // Index for search if index is provided
         if let Some(ref index) = options.search_index {
@@ -605,20 +631,19 @@ fn process_phase(
             let thread_id = message.thread_id.clone();
             let is_new_thread = !store.has_thread(&thread_id)?;
 
-            // Store message
+            // Compute thread first (including this new message)
+            // Must upsert thread BEFORE message due to FK constraint
+            let compute_start = Instant::now();
+            let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+            compute_thread_us += compute_start.elapsed().as_micros() as u64;
+
             let storage_start = Instant::now();
+            store.upsert_thread(thread.clone())?;
+
+            // Now store message (thread exists, FK constraint satisfied)
             store.upsert_message(message.clone())?;
             storage_us += storage_start.elapsed().as_micros() as u64;
             stats.messages_created += 1;
-
-            // Compute and update thread
-            let compute_start = Instant::now();
-            let thread = compute_thread(&thread_id, &[], store)?;
-            compute_thread_us += compute_start.elapsed().as_micros() as u64;
-
-            let thread_storage_start = Instant::now();
-            store.upsert_thread(thread.clone())?;
-            storage_us += thread_storage_start.elapsed().as_micros() as u64;
 
             // Index for search if index is provided
             if let Some(ref index) = options.search_index {
@@ -791,20 +816,19 @@ fn incremental_sync(
                             let thread_id = message.thread_id.clone();
                             let is_new_thread = !store.has_thread(&thread_id)?;
 
-                            // Store message
+                            // Compute thread first (including this new message)
+                            // Must upsert thread BEFORE message due to FK constraint
+                            let compute_start = Instant::now();
+                            let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+                            stats.timing.compute_thread_ms += compute_start.elapsed().as_micros() as u64;
+
                             let storage_start = Instant::now();
+                            store.upsert_thread(thread.clone())?;
+
+                            // Now store message (thread exists, FK constraint satisfied)
                             store.upsert_message(message.clone())?;
                             storage_us += storage_start.elapsed().as_micros() as u64;
                             stats.messages_created += 1;
-
-                            // Compute and update thread
-                            let compute_start = Instant::now();
-                            let thread = compute_thread(&thread_id, &[], store)?;
-                            stats.timing.compute_thread_ms += compute_start.elapsed().as_micros() as u64;
-
-                            let thread_storage_start = Instant::now();
-                            store.upsert_thread(thread.clone())?;
-                            storage_us += thread_storage_start.elapsed().as_micros() as u64;
 
                             // Index for search if index is provided
                             if let Some(ref index) = options.search_index {
@@ -927,13 +951,32 @@ fn compute_thread(
     new_messages: &[Message],
     store: &dyn MailStore,
 ) -> Result<Thread> {
-    // Get existing messages for this thread
+    // Get existing messages for this thread (as metadata)
     let existing_messages = store.list_messages_for_thread(thread_id)?;
 
-    // Combine existing and new messages
-    let all_messages: Vec<&Message> = existing_messages
+    // Convert new messages to metadata for uniform handling
+    let new_metadata: Vec<MessageMetadata> = new_messages
         .iter()
-        .chain(new_messages.iter())
+        .map(|m| MessageMetadata {
+            id: m.id.clone(),
+            thread_id: m.thread_id.clone(),
+            from: m.from.clone(),
+            to: m.to.clone(),
+            cc: m.cc.clone(),
+            subject: m.subject.clone(),
+            body_preview: m.body_preview.clone(),
+            received_at: m.received_at,
+            internal_date: m.internal_date,
+            label_ids: m.label_ids.clone(),
+            has_body_text: m.body_text.is_some(),
+            has_body_html: m.body_html.is_some(),
+        })
+        .collect();
+
+    // Combine existing and new messages
+    let all_messages: Vec<&MessageMetadata> = existing_messages
+        .iter()
+        .chain(new_metadata.iter())
         .collect();
 
     // Find the latest message for subject and snippet

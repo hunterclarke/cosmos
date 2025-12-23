@@ -1,0 +1,7 @@
+rm -rf \
+  ~/Library/Application\ Support/cosmos/blobs/ \
+  ~/Library/Application\ Support/cosmos/mail.db \
+  ~/Library/Application\ Support/cosmos/mail.db-shm \
+  ~/Library/Application\ Support/cosmos/mail.db-wal \
+  ~/Library/Application\ Support/cosmos/mail.search.idx/ \
+  ~/Library/Application\ Support/cosmos/gmail-tokens.json
