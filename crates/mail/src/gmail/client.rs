@@ -5,8 +5,6 @@
 
 use anyhow::{Context, Result};
 use log::info;
-use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::api::{
@@ -40,23 +38,8 @@ impl GmailClient {
     /// # Arguments
     /// * `max_results` - Maximum number of messages to return per page (1-500)
     /// * `page_token` - Optional page token for pagination
-    pub fn list_messages(
-        &self,
-        max_results: usize,
-        page_token: Option<&str>,
-    ) -> Result<ListMessagesResponse> {
-        self.list_messages_with_label(max_results, page_token, None)
-    }
-
-    /// List message IDs from the user's mailbox, optionally filtered by label
-    ///
-    /// # Arguments
-    /// * `max_results` - Maximum number of messages to return per page (1-500)
-    /// * `page_token` - Optional page token for pagination
     /// * `label_id` - Optional label ID to filter by (e.g., "INBOX")
-    ///
-    /// Note: This includes TRASH and SPAM for full Gmail parity.
-    pub fn list_messages_with_label(
+    pub fn list_messages(
         &self,
         max_results: usize,
         page_token: Option<&str>,
@@ -123,7 +106,7 @@ impl GmailClient {
                 }
             }
 
-            let response = self.list_messages(500, page_token.as_deref())?;
+            let response = self.list_messages(500, page_token.as_deref(), None)?;
 
             // Track total estimate
             if response.result_size_estimate.is_some() {
@@ -230,8 +213,8 @@ impl GmailClient {
             (0..total).map(|_| None).collect();
 
         // Adaptive rate limiting: adjust delay based on rate limit feedback
-        // Start with small delay, increase on rate limits, decrease on success
-        let mut inter_batch_delay_ms = 200u64; // Start conservative
+        // Start with modest delay, increase on rate limits, decrease on success
+        let mut inter_batch_delay_ms = 100u64;
         let mut backoff_ms = 0u64; // Extra backoff when rate limited
 
         for (batch_idx, chunk) in ids.chunks(batch_size).enumerate() {
@@ -271,13 +254,14 @@ impl GmailClient {
                     self.fetch_batch(&access_token, &pending_ids, batch_idx + 1, num_batches);
 
                 // Process results, separating successes from retriable errors
-                // Retry: 408 (timeout), 429 (rate limit), 5xx (server errors)
+                // Retry: 408 (timeout), 429 (rate limit), 403 (quota exceeded), 5xx (server errors)
                 let mut next_pending = Vec::new();
                 for ((chunk_idx, id), result) in pending.into_iter().zip(batch_results) {
                     let is_retriable = result.as_ref().is_err_and(|e| {
                         let msg = e.to_string();
                         msg.contains("408")
                             || msg.contains("429")
+                            || (msg.contains("403") && msg.to_lowercase().contains("quota"))
                             || msg.contains("500")
                             || msg.contains("502")
                             || msg.contains("503")
@@ -453,15 +437,16 @@ impl GmailClient {
                 }
                 Ok(BatchResponse::Error(err)) => {
                     let error_msg = match err.error.code {
-                        408 => "Request timeout (408)",
-                        429 => "Rate limited (429)",
-                        500 => "Internal server error (500)",
-                        502 => "Bad gateway (502)",
-                        503 => "Service unavailable (503)",
-                        504 => "Gateway timeout (504)",
+                        408 => "Request timeout (408)".to_string(),
+                        429 => "Rate limited (429)".to_string(),
+                        500 => "Internal server error (500)".to_string(),
+                        502 => "Bad gateway (502)".to_string(),
+                        503 => "Service unavailable (503)".to_string(),
+                        504 => "Gateway timeout (504)".to_string(),
                         code => {
                             warn!("Gmail API error {}: {}", code, err.error.message);
-                            "API error"
+                            // Include code and message so retry logic can detect quota errors
+                            format!("API error {}: {}", code, err.error.message)
                         }
                     };
                     results.push(Err(anyhow::anyhow!("{}", error_msg)));
@@ -481,108 +466,6 @@ impl GmailClient {
         }
 
         results
-    }
-
-    /// Get multiple messages in parallel with progress reporting (legacy method)
-    ///
-    /// Uses individual requests with rayon parallelism. Prefer get_messages_batch()
-    /// which uses the batch API for better performance.
-    #[allow(dead_code)]
-    fn get_messages_parallel<F>(
-        &self,
-        ids: &[MessageId],
-        progress: F,
-    ) -> Vec<Result<GmailMessage>>
-    where
-        F: Fn(usize, usize) + Sync,
-    {
-        if ids.is_empty() {
-            return Vec::new();
-        }
-
-        // Pre-fetch access token to avoid contention during parallel fetches
-        let access_token = match self.auth.get_access_token() {
-            Ok(token) => token,
-            Err(e) => {
-                // Return error for all messages if we can't get a token
-                let err_msg = format!("Failed to get access token: {}", e);
-                return ids
-                    .iter()
-                    .map(|_| Err(anyhow::anyhow!("{}", err_msg)))
-                    .collect();
-            }
-        };
-
-        let total = ids.len();
-        let completed = AtomicUsize::new(0);
-        let num_threads = rayon::current_num_threads();
-        info!(
-            "Fetching {} messages in parallel ({} threads)",
-            total, num_threads
-        );
-
-        // Fetch messages in parallel using rayon
-        let results: Vec<_> = ids
-            .par_iter()
-            .map(|id| {
-                let result = self.get_message_with_token_retry(id, &access_token, 3);
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress(done, total);
-                result
-            })
-            .collect();
-
-        info!("Parallel fetch complete: {} messages", total);
-        results
-    }
-
-    /// Get a message using a pre-fetched access token with retry
-    fn get_message_with_token_retry(
-        &self,
-        id: &MessageId,
-        access_token: &str,
-        max_retries: u32,
-    ) -> Result<GmailMessage> {
-        let mut last_error = None;
-        let mut delay = Duration::from_millis(100);
-
-        for attempt in 0..max_retries {
-            match self.get_message_with_token(id, access_token) {
-                Ok(msg) => return Ok(msg),
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt < max_retries - 1 {
-                        // Add jitter to delay
-                        let jitter = Duration::from_millis(rand_jitter());
-                        std::thread::sleep(delay + jitter);
-                        delay *= 2;
-                    }
-                }
-            }
-        }
-
-        Err(last_error.unwrap())
-    }
-
-    /// Get a message using a pre-fetched access token
-    fn get_message_with_token(&self, id: &MessageId, access_token: &str) -> Result<GmailMessage> {
-        let url = format!(
-            "{}/users/me/messages/{}?format=full",
-            Self::BASE_URL,
-            id.as_str()
-        );
-
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call()
-            .context("Failed to send get message request")?;
-
-        let message: GmailMessage = response
-            .body_mut()
-            .read_json()
-            .context("Failed to parse message response")?;
-
-        Ok(message)
     }
 
     /// Check if the client is authenticated
@@ -865,13 +748,13 @@ impl GmailClient {
     }
 }
 
-/// Generate a random jitter value (0-100ms)
+/// Generate a pseudo-random jitter value (0-100ms)
 fn rand_jitter() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    let hasher = RandomState::new().build_hasher();
-    hasher.finish() % 100
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 % 100)
+        .unwrap_or(50)
 }
 
 /// Check if an error is retriable (transient server error)

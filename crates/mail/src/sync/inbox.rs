@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,8 +22,6 @@ pub struct SyncOptions {
     pub max_messages: Option<usize>,
     /// Force full resync even if history_id exists
     pub full_resync: bool,
-    /// Filter by label ID (e.g., "INBOX") - for debugging
-    pub label_filter: Option<String>,
     /// Optional search index for incremental indexing during sync
     pub search_index: Option<Arc<SearchIndex>>,
 }
@@ -177,7 +175,6 @@ fn initial_sync(
             let profile_start = Instant::now();
             let history_id = get_current_history_id(gmail)?;
             stats.timing.profile_ms += profile_start.elapsed().as_millis() as u64;
-            debug!("[SYNC] get_profile: {:?}", profile_start.elapsed());
             info!("Starting initial sync from history_id: {}", history_id);
 
             // Save partial sync state to indicate initial sync is in progress
@@ -215,19 +212,6 @@ fn initial_sync(
     // Record total initial sync time
     stats.timing.initial_sync_ms = sync_start.elapsed().as_millis() as u64;
 
-    debug!("[SYNC] initial_sync complete: {:?}", sync_start.elapsed());
-    debug!(
-        "[SYNC] timing breakdown - profile: {}ms, list: {}ms, fetch: {}ms, normalize: {}ms, storage: {}ms, compute_thread: {}ms, has_message: {}ms, search_index: {}ms, total: {}ms",
-        stats.timing.profile_ms,
-        stats.timing.list_messages_ms,
-        stats.timing.fetch_messages_ms,
-        stats.timing.normalize_ms,
-        stats.timing.storage_ms,
-        stats.timing.compute_thread_ms,
-        stats.timing.has_message_ms,
-        stats.timing.search_index_ms,
-        stats.timing.initial_sync_ms
-    );
     info!(
         "Initial sync complete: {} messages fetched, {} created, {} skipped in {}ms",
         stats.messages_fetched,
@@ -295,16 +279,6 @@ pub fn fetch_phase(
     options: &SyncOptions,
     stats: &mut SyncStats,
 ) -> Result<FetchPhaseStats> {
-    debug!("[SYNC] >>> ENTERED fetch_phase <<<");
-
-    // Log current store state for debugging
-    let message_count = store.count_threads().unwrap_or(0);
-    let pending_count = store.count_pending_messages(None).unwrap_or(0);
-    info!(
-        "[SYNC] fetch_phase starting: {} threads in store, {} pending messages",
-        message_count, pending_count
-    );
-
     let mut fetch_stats = FetchPhaseStats {
         fetched: 0,
         pending: 0,
@@ -314,19 +288,11 @@ pub fn fetch_phase(
     let mut page_token: Option<String> = None;
     let mut total_listed = 0usize;
     let batch_size = 500; // Gmail API max is 500 per page
-    let mut batch_num = 0usize;
-
-    debug!("[SYNC] fetch_phase starting, batch_size={}", batch_size);
 
     loop {
-        batch_num += 1;
-        let batch_start = Instant::now();
-        debug!("[SYNC] Starting fetch batch {}", batch_num);
-
         // Check if we've hit the limit
         if let Some(max) = options.max_messages {
             if total_listed >= max {
-                debug!("[SYNC] Hit max_messages limit: {}", max);
                 break;
             }
         }
@@ -339,15 +305,13 @@ pub fn fetch_phase(
         };
 
         // Fetch a page of message IDs
-        debug!("[SYNC] Calling list_messages_with_label...");
         let list_start = Instant::now();
-        let list_response = gmail.list_messages_with_label(
+        let list_response = gmail.list_messages(
             effective_batch_size,
             page_token.as_deref(),
-            options.label_filter.as_deref(),
+            None,
         )?;
         stats.timing.list_messages_ms += list_start.elapsed().as_millis() as u64;
-        debug!("[SYNC] list_messages batch {}: {:?}", batch_num, list_start.elapsed());
 
         let message_refs = list_response.messages.unwrap_or_default();
 
@@ -376,26 +340,12 @@ pub fn fetch_phase(
             }
         }
         stats.timing.has_message_ms += has_msg_start.elapsed().as_millis() as u64;
-        debug!("[SYNC] has_message checks ({} msgs): {:?}", message_refs.len(), has_msg_start.elapsed());
-
         stats.messages_fetched += message_refs.len();
 
-        info!(
-            "[SYNC] Batch {}: {} listed, {} to fetch, {} skipped (total skipped: {})",
-            batch_num,
-            message_refs.len(),
-            to_fetch.len(),
-            message_refs.len() - to_fetch.len(),
-            fetch_stats.skipped
-        );
-
         if !to_fetch.is_empty() {
-            info!("Fetching {} new messages...", to_fetch.len());
-
-            // Fetch in small chunks and store immediately for greedy ingestion
-            // This allows the process phase to start working while we're still fetching
-            // No artificial delays - let Gmail's rate limiting control the speed
-            let chunk_size = 50; // Larger chunks = fewer HTTP requests
+            // Fetch in chunks and store immediately for greedy ingestion
+            // Gmail batch API allows up to 100 requests per batch
+            let chunk_size = 100;
             for chunk in to_fetch.chunks(chunk_size) {
                 let fetch_start = Instant::now();
                 let results = gmail.get_messages_batch(chunk);
@@ -403,8 +353,6 @@ pub fn fetch_phase(
 
                 // Store immediately after each chunk
                 let store_start = Instant::now();
-                let mut chunk_stored = 0;
-                let mut chunk_errors = 0;
                 for result in results {
                     match result {
                         Ok(gmail_msg) => {
@@ -415,40 +363,26 @@ pub fn fetch_phase(
                                 Ok(data) => {
                                     if let Err(e) = store.store_pending_message(&msg_id, &data, label_ids) {
                                         warn!("Failed to store pending message {}: {}", msg_id.as_str(), e);
-                                        chunk_errors += 1;
                                         stats.errors += 1;
                                     } else {
                                         fetch_stats.fetched += 1;
                                         fetch_stats.pending += 1;
-                                        chunk_stored += 1;
                                     }
                                 }
                                 Err(e) => {
                                     warn!("Failed to serialize message {}: {}", msg_id.as_str(), e);
-                                    chunk_errors += 1;
                                     stats.errors += 1;
                                 }
                             }
                         }
                         Err(e) => {
                             warn!("Failed to fetch message: {}", e);
-                            chunk_errors += 1;
                             stats.errors += 1;
                         }
                     }
                 }
                 stats.timing.storage_ms += store_start.elapsed().as_millis() as u64;
-
-                if chunk_stored > 0 {
-                    debug!("[SYNC] Stored {} pending ({} errors), total pending: {}",
-                        chunk_stored, chunk_errors, fetch_stats.pending);
-                }
             }
-
-            debug!(
-                "[SYNC] fetch batch {} complete: {:?} ({} pending)",
-                batch_num, batch_start.elapsed(), fetch_stats.pending
-            );
         }
 
         // Check for next page
@@ -587,12 +521,6 @@ fn process_phase(
     let mut compute_thread_us: u64 = 0;
     let mut search_index_us: u64 = 0;
 
-    // Process INBOX messages first for fast time-to-inbox
-    let inbox_count = store.count_pending_messages(Some("INBOX"))?;
-    if inbox_count > 0 {
-        info!("[SYNC] Processing {} INBOX messages first...", inbox_count);
-    }
-
     loop {
         // Get next batch of pending messages (INBOX prioritized automatically)
         let pending = store.get_pending_messages(None, process_batch_size)?;
@@ -600,8 +528,6 @@ fn process_phase(
         if pending.is_empty() {
             break;
         }
-
-        debug!("[SYNC] processing batch of {} pending messages", pending.len());
 
         for pending_msg in pending {
             // Deserialize the raw Gmail message
@@ -673,15 +599,8 @@ fn process_phase(
             if let Err(e) = index.commit() {
                 warn!("Failed to commit search index: {}", e);
             }
-            search_index_us += commit_start.elapsed().as_millis() as u64 * 1000; // Convert to us
+            search_index_us += commit_start.elapsed().as_millis() as u64 * 1000;
         }
-
-        info!(
-            "[SYNC] Processed: {} messages, {} threads ({} remaining)",
-            stats.messages_created,
-            stats.threads_created + stats.threads_updated,
-            store.count_pending_messages(None)?
-        );
     }
 
     // Convert microseconds to milliseconds
@@ -719,7 +638,6 @@ fn incremental_sync(
         .list_history_all(&state.history_id)
         .context("Failed to fetch history")?;
     stats.timing.history_ms = history_start.elapsed().as_millis() as u64;
-    debug!("[SYNC] list_history_all: {:?}", history_start.elapsed());
 
     // Collect message IDs to fetch (new messages)
     let mut message_ids_to_fetch: Vec<MessageId> = Vec::new();
@@ -797,12 +715,9 @@ fn incremental_sync(
 
     // Fetch and store new messages
     if !message_ids_to_fetch.is_empty() {
-        debug!("[SYNC] fetching {} new messages from history", message_ids_to_fetch.len());
-
         let fetch_start = Instant::now();
         let results = gmail.get_messages_batch(&message_ids_to_fetch);
         stats.timing.fetch_messages_ms += fetch_start.elapsed().as_millis() as u64;
-        debug!("[SYNC] fetch_messages ({} msgs): {:?}", message_ids_to_fetch.len(), fetch_start.elapsed());
 
         for result in results {
             match result {
@@ -906,43 +821,12 @@ fn incremental_sync(
     // Record total incremental sync time
     stats.timing.incremental_sync_ms = sync_start.elapsed().as_millis() as u64;
 
-    debug!("[SYNC] incremental_sync complete: {:?}", sync_start.elapsed());
-    debug!(
-        "[SYNC] timing breakdown - history: {}ms, fetch: {}ms, normalize: {}ms, storage: {}ms, compute_thread: {}ms, search_index: {}ms, total: {}ms",
-        stats.timing.history_ms,
-        stats.timing.fetch_messages_ms,
-        stats.timing.normalize_ms,
-        stats.timing.storage_ms,
-        stats.timing.compute_thread_ms,
-        stats.timing.search_index_ms,
-        stats.timing.incremental_sync_ms
-    );
     info!(
         "Incremental sync: {} messages, {} label updates in {}ms",
         stats.messages_created, stats.labels_updated, stats.timing.incremental_sync_ms
     );
 
     Ok(stats)
-}
-
-/// Legacy sync function for backward compatibility with Phase 1
-///
-/// This function syncs the entire mailbox (not just inbox).
-/// For incremental sync support, use `sync_gmail` instead.
-pub fn sync_inbox(
-    gmail: &GmailClient,
-    store: &dyn MailStore,
-    max_messages: usize,
-) -> Result<SyncStats> {
-    // Use a default account ID for legacy API
-    let options = SyncOptions {
-        max_messages: Some(max_messages),
-        full_resync: false,
-        label_filter: None,
-        search_index: None,
-    };
-
-    sync_gmail(gmail, store, "default", options)
 }
 
 /// Compute thread properties from its messages

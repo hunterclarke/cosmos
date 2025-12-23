@@ -7,5 +7,5 @@ mod inbox;
 
 pub use inbox::{
     FetchPhaseStats, ProcessBatchResult, SyncOptions, SyncStats, SyncTiming,
-    fetch_phase, process_pending_batch, sync_gmail, sync_inbox,
+    fetch_phase, process_pending_batch, sync_gmail,
 };
