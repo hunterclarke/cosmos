@@ -64,6 +64,27 @@ pub mod api {
         pub thread_id: String,
     }
 
+    /// Gmail API error response
+    #[derive(Debug, Deserialize)]
+    pub struct GmailErrorResponse {
+        pub error: GmailError,
+    }
+
+    /// Gmail API error details
+    #[derive(Debug, Deserialize)]
+    pub struct GmailError {
+        pub code: u16,
+        pub message: String,
+    }
+
+    /// Batch response that can be either a message or an error
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    pub enum BatchResponse {
+        Message(GmailMessage),
+        Error(GmailErrorResponse),
+    }
+
     /// Full message from Gmail API
     #[derive(Debug, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]

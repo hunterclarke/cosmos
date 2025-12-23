@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::api::{
-    BatchModifyRequest, GmailMessage, HistoryResponse, ListLabelsResponse, ListMessagesResponse,
-    ModifyMessageRequest, ProfileResponse,
+    BatchModifyRequest, BatchResponse, GmailMessage, HistoryResponse, ListLabelsResponse,
+    ListMessagesResponse, ModifyMessageRequest, ProfileResponse,
 };
 use super::GmailAuth;
 use crate::models::MessageId;
@@ -439,78 +439,38 @@ impl GmailClient {
             // 4. HTTP headers
             // 5. Blank line
             // 6. JSON body
-            //
-            // We need to find the JSON body which starts after the SECOND blank line
 
             // Find the start of JSON by looking for opening brace
-            if let Some(json_start) = part.find('{') {
-                // Find matching closing brace by counting braces
-                let json_slice = &part[json_start..];
-                let mut brace_count = 0;
-                let mut json_end = 0;
+            let Some(json_start) = part.find('{') else {
+                continue;
+            };
 
-                for (i, c) in json_slice.char_indices() {
-                    match c {
-                        '{' => brace_count += 1,
-                        '}' => {
-                            brace_count -= 1;
-                            if brace_count == 0 {
-                                json_end = i + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
+            let json = part[json_start..].trim();
+
+            match serde_json::from_str::<BatchResponse>(json) {
+                Ok(BatchResponse::Message(msg)) => {
+                    results.push(Ok(msg));
                 }
-
-                if json_end > 0 {
-                    let json = &json_slice[..json_end];
-                    let json_trimmed = json.trim();
-
-                    // Check for error response - error JSON has "error" as the first/only key
-                    // Handle various formatting: {"error", { "error", {\n  "error", etc.
-                    let is_error = {
-                        // Remove leading { and whitespace, check if starts with "error"
-                        let after_brace = json_trimmed.strip_prefix('{').unwrap_or("");
-                        let trimmed = after_brace.trim_start();
-                        trimmed.starts_with("\"error\"")
-                    };
-                    if is_error {
-                        // Extract status code from error for retry logic
-                        // Retriable: 408, 429, 500, 502, 503, 504
-                        let error_msg = if json.contains("429") || json.contains("Too many") {
-                            "Rate limited (429)"
-                        } else if json.contains("503") {
-                            "Service unavailable (503)"
-                        } else if json.contains("502") {
-                            "Bad gateway (502)"
-                        } else if json.contains("500") {
-                            "Internal server error (500)"
-                        } else if json.contains("504") {
-                            "Gateway timeout (504)"
-                        } else if json.contains("408") {
-                            "Request timeout (408)"
-                        } else {
-                            let preview: String = json.chars().take(100).collect();
-                            warn!("Gmail API error: {}", preview);
+                Ok(BatchResponse::Error(err)) => {
+                    let error_msg = match err.error.code {
+                        408 => "Request timeout (408)",
+                        429 => "Rate limited (429)",
+                        500 => "Internal server error (500)",
+                        502 => "Bad gateway (502)",
+                        503 => "Service unavailable (503)",
+                        504 => "Gateway timeout (504)",
+                        code => {
+                            warn!("Gmail API error {}: {}", code, err.error.message);
                             "API error"
-                        };
-                        results.push(Err(anyhow::anyhow!("{}", error_msg)));
-                        continue;
-                    }
-
-                    match serde_json::from_str::<GmailMessage>(json) {
-                        Ok(msg) => results.push(Ok(msg)),
-                        Err(e) => {
-                            // Log first 200 chars of JSON for debugging
-                            let preview: String = json.chars().take(200).collect();
-                            debug!("Failed JSON preview: {}", preview);
-                            warn!("Failed to parse message JSON: {}", e);
-                            results.push(Err(anyhow::anyhow!("Failed to parse message: {}", e)));
                         }
-                    }
-                } else {
-                    results.push(Err(anyhow::anyhow!("Malformed JSON in batch response")));
+                    };
+                    results.push(Err(anyhow::anyhow!("{}", error_msg)));
+                }
+                Err(e) => {
+                    let preview: String = json.chars().take(200).collect();
+                    debug!("Failed JSON preview: {}", preview);
+                    warn!("Failed to parse batch response: {}", e);
+                    results.push(Err(anyhow::anyhow!("Failed to parse response: {}", e)));
                 }
             }
         }
