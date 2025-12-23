@@ -213,8 +213,9 @@ impl GmailClient {
             (0..total).map(|_| None).collect();
 
         // Adaptive rate limiting: adjust delay based on rate limit feedback
-        // Start with modest delay, increase on rate limits, decrease on success
-        let mut inter_batch_delay_ms = 100u64;
+        // Gmail quota: 250 units/sec, messages.get = 5 units, so ~50 gets/sec max
+        // With 50 messages per batch, we need ~1 second between batches
+        let mut inter_batch_delay_ms = 1000u64;
         let mut backoff_ms = 0u64; // Extra backoff when rate limited
 
         for (batch_idx, chunk) in ids.chunks(batch_size).enumerate() {

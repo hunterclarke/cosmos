@@ -343,9 +343,9 @@ pub fn fetch_phase(
         stats.messages_fetched += message_refs.len();
 
         if !to_fetch.is_empty() {
-            // Fetch in chunks and store immediately for greedy ingestion
-            // Gmail batch API allows up to 100 requests per batch
-            let chunk_size = 100;
+            // Gmail batch API has aggressive rate limiting independent of quota
+            // 25 messages per batch with no delay works reliably
+            let chunk_size = 25;
             for chunk in to_fetch.chunks(chunk_size) {
                 let fetch_start = Instant::now();
                 let results = gmail.get_messages_batch(chunk);
