@@ -4,17 +4,19 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::scroll::Scrollbar;
 use gpui_component::spinner::Spinner;
-use gpui_component::{v_virtual_list, ActiveTheme, Sizable, Size as ComponentSize, VirtualListScrollHandle};
+use gpui_component::{
+    ActiveTheme, Sizable, Size as ComponentSize, VirtualListScrollHandle, v_virtual_list,
+};
 use log::{error, info};
-use mail::{search_threads, MailStore, SearchIndex, SearchResult, parse_query};
+use mail::{MailStore, SearchIndex, SearchResult, parse_query, search_threads};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::app::OrionApp;
 use crate::components::SearchResultItem;
 
-/// Height of each search result item
-const RESULT_ITEM_HEIGHT: f32 = 100.0;
+/// Height of each search result item (matches thread list item styling with 3 lines)
+const RESULT_ITEM_HEIGHT: f32 = 86.0;
 
 /// View for displaying search results
 pub struct SearchResultsView {
@@ -32,11 +34,7 @@ pub struct SearchResultsView {
 }
 
 impl SearchResultsView {
-    pub fn new(
-        store: Arc<dyn MailStore>,
-        index: Arc<SearchIndex>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(store: Arc<dyn MailStore>, index: Arc<SearchIndex>, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             index,
@@ -178,30 +176,25 @@ impl SearchResultsView {
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        div()
-            .flex_1()
-            .flex()
-            .justify_center()
-            .items_center()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No results found"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Try different search terms"),
-                    ),
-            )
+        div().flex_1().flex().justify_center().items_center().child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("No results found"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Try different search terms"),
+                ),
+        )
     }
 
     fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -255,7 +248,11 @@ impl SearchResultsView {
                                         view.selected_index = ix;
                                         view.open_selected(cx);
                                     }))
-                                    .child(SearchResultItem::new(result, is_selected, terms.clone()))
+                                    .child(SearchResultItem::new(
+                                        result,
+                                        is_selected,
+                                        terms.clone(),
+                                    ))
                             })
                             .collect()
                     },
@@ -304,7 +301,12 @@ impl SearchResultsView {
         self.select_next(cx);
     }
 
-    fn handle_open_selected(&mut self, _: &OpenSelected, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_open_selected(
+        &mut self,
+        _: &OpenSelected,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_selected(cx);
     }
 }

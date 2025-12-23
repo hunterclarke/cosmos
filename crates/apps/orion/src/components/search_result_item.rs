@@ -124,20 +124,14 @@ impl RenderOnce for SearchResultItem {
         let snippet_styled = self.render_highlighted_text(&snippet);
 
         div()
-            .w_full()
-            .flex()
-            .flex_col()
-            // Divider at top (full width)
-            .child(div().w_full().h_px().bg(theme.border))
-            // Content row with background
+            .size_full()
+            .bg(bg_color)
+            .border_t_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.list_hover))
+            .overflow_hidden()
             .child(
-                div()
-                    .w_full()
-                    .bg(bg_color)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.list_hover))
-                    .overflow_hidden()
-                    .child(
                         // Inner content with horizontal padding
                         div()
                             .px_3()
@@ -226,7 +220,6 @@ impl RenderOnce for SearchResultItem {
                                         )
                                     }),
                             ),
-                    ),
-            )
+                    )
     }
 }
