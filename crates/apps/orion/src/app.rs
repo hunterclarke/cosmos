@@ -8,8 +8,8 @@ use gpui_component::webview::WebView;
 use gpui_component::{ActiveTheme, Sizable};
 use log::{debug, error, info, warn};
 use mail::{
-    ActionHandler, GmailAuth, GmailClient, HeedMailStore, Label, LabelId, MailStore, SearchIndex,
-    SyncOptions, SyncStats, ThreadId,
+    ActionHandler, FileBlobStore, GmailAuth, GmailClient, Label, LabelId, MailStore, SearchIndex,
+    SqliteMailStore, SyncOptions, SyncState, SyncStats, ThreadId,
 };
 use std::sync::Arc;
 
@@ -104,7 +104,10 @@ impl OrionApp {
 
         // Start with in-memory store for instant startup
         let store: Arc<dyn MailStore> = Arc::new(mail::InMemoryMailStore::new());
-        debug!("[BOOT]   InMemoryMailStore created: {:?}", new_start.elapsed());
+        debug!(
+            "[BOOT]   InMemoryMailStore created: {:?}",
+            new_start.elapsed()
+        );
 
         // Create thread list view with empty store (will be populated after DB loads)
         let store_clone = store.clone();
@@ -152,11 +155,17 @@ impl OrionApp {
                     let store: Arc<dyn MailStore> = match Self::create_persistent_store() {
                         Ok(store) => Arc::new(store),
                         Err(e) => {
-                            warn!("Failed to create persistent storage: {}, using in-memory", e);
+                            warn!(
+                                "Failed to create persistent storage: {}, using in-memory",
+                                e
+                            );
                             return Err(e);
                         }
                     };
-                    debug!("[BOOT]   Database opened (background): {:?}", start.elapsed());
+                    debug!(
+                        "[BOOT]   Database opened (background): {:?}",
+                        start.elapsed()
+                    );
 
                     let last_sync_at = store
                         .get_sync_state("default")
@@ -166,7 +175,10 @@ impl OrionApp {
 
                     let search_index = match Self::create_search_index() {
                         Ok(index) => {
-                            debug!("[BOOT]   SearchIndex opened (background): {:?}", start.elapsed());
+                            debug!(
+                                "[BOOT]   SearchIndex opened (background): {:?}",
+                                start.elapsed()
+                            );
                             Some(Arc::new(index))
                         }
                         Err(e) => {
@@ -204,9 +216,18 @@ impl OrionApp {
                         }
 
                         info!("Persistent storage loaded");
+
+                        // Auto-start sync if Gmail is configured but we haven't synced yet
+                        // This triggers the OAuth flow if not authenticated, then syncs
+                        if app.gmail_client.is_some() && app.last_sync_at.is_none() {
+                            info!("No previous sync found, starting initial sync...");
+                            app.sync(cx);
+                        }
+
                         cx.notify();
                     })
-                }).ok();
+                })
+                .ok();
             }
         })
         .detach();
@@ -271,15 +292,20 @@ impl OrionApp {
     }
 
     /// Create persistent storage in the config directory
-    fn create_persistent_store() -> anyhow::Result<HeedMailStore> {
+    fn create_persistent_store() -> anyhow::Result<SqliteMailStore> {
         // Ensure config directory exists
         config::init()?;
 
-        // Get path for mail database (LMDB uses a directory, not a file)
-        let db_path = config::config_path("mail.lmdb")
+        // Get paths for database and blob storage
+        let db_path = config::config_path("mail.db")
+            .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
+        let blob_path = config::config_path("blobs")
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?;
 
-        HeedMailStore::new(&db_path)
+        // Create blob store for message bodies
+        let blob_store = Box::new(FileBlobStore::new(&blob_path)?);
+
+        SqliteMailStore::new(&db_path, blob_store)
     }
 
     /// Wire up navigation by setting app handle on child views
@@ -580,31 +606,6 @@ impl OrionApp {
         Ok(())
     }
 
-    /// Fetch Gmail profile (email address) in the background
-    pub fn fetch_profile(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.gmail_client.clone() else {
-            return;
-        };
-
-        let background = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            let result = background
-                .spawn(async move { client.get_profile() })
-                .await;
-
-            if let Ok(profile) = result {
-                cx.update(|cx| {
-                    this.update(cx, |app, cx| {
-                        app.profile_email = Some(profile.email_address);
-                        cx.notify();
-                    })
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// Navigate to thread list view
     pub fn show_inbox(&mut self, cx: &mut Context<Self>) {
         if self.thread_list_view.is_none() {
@@ -717,10 +718,15 @@ impl OrionApp {
 
     /// Trigger inbox sync with event-driven UI updates
     ///
-    /// Instead of polling every 500ms, this updates the UI after each batch
-    /// of messages is processed, providing real-time feedback.
+    /// Runs fetch and process phases in parallel for maximum throughput.
+    /// SQLite handles concurrent access properly with WAL mode.
+    ///
+    /// When transitioning from unauthenticated to authenticated (first sync after OAuth),
+    /// clears the database and search index to start fresh.
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         use mail::{fetch_phase, process_pending_batch};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
 
         if self.is_syncing {
             return;
@@ -732,6 +738,16 @@ impl OrionApp {
             return;
         };
 
+        // Check if we have an existing sync state (meaning we've synced before)
+        // This is different from is_authenticated() which checks token validity
+        // Token can expire but we still have valid sync data
+        let has_existing_sync = self.last_sync_at.is_some();
+        debug!(
+            "[SYNC] has_existing_sync: {}, is_authenticated: {}",
+            has_existing_sync,
+            client.is_authenticated()
+        );
+
         self.is_syncing = true;
         self.sync_error = None;
         cx.notify();
@@ -740,60 +756,155 @@ impl OrionApp {
         let search_index = self.search_index.clone();
         let background = cx.background_executor().clone();
 
-        // Shared flag to indicate fetch is still running
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let fetch_active = Arc::new(AtomicBool::new(true));
-        let fetch_active_for_process = fetch_active.clone();
-
-        // Spawn fetch phase in background (doesn't block)
-        let store_for_fetch = store.clone();
-        let search_index_for_fetch = search_index.clone();
-        let background_for_fetch = background.clone();
-
-        cx.spawn(async move |_this, _cx| {
-            debug!("[SYNC] Starting fetch phase in background...");
+        cx.spawn(async move |this, cx| {
             let options = SyncOptions {
-                search_index: search_index_for_fetch,
+                search_index: search_index.clone(),
                 ..Default::default()
             };
-            let mut stats = SyncStats::default();
 
-            let result = background_for_fetch
-                .spawn(async move {
-                    fetch_phase(&client, store_for_fetch.as_ref(), &options, &mut stats)
-                })
+            // Capture history_id and profile at start of sync
+            // history_id is needed for saving sync state (incremental sync)
+            // email_address is for display in sidebar
+            let client_for_profile = client.clone();
+            let profile_result = background
+                .spawn(async move { client_for_profile.get_profile() })
                 .await;
 
-            // Mark fetch as complete
-            fetch_active.store(false, Ordering::SeqCst);
-
-            match result {
-                Ok(fetch_stats) => {
-                    debug!("[SYNC] Fetch phase complete: {} fetched, {} pending",
-                        fetch_stats.fetched, fetch_stats.pending);
+            let (history_id, profile_email) = match profile_result {
+                Ok(profile) => {
+                    info!(
+                        "[SYNC] Captured profile: email={}, history_id={}",
+                        profile.email_address, profile.history_id
+                    );
+                    (Some(profile.history_id), Some(profile.email_address))
                 }
                 Err(e) => {
-                    error!("[SYNC] Fetch phase failed: {}", e);
+                    warn!("[SYNC] Failed to get profile: {}", e);
+                    (None, None)
+                }
+            };
+
+            // Update profile email immediately
+            if let Some(email) = profile_email {
+                cx.update(|cx| {
+                    this.update(cx, |app, cx| {
+                        app.profile_email = Some(email);
+                        cx.notify();
+                    })
+                })
+                .ok();
+            }
+
+            // Only clear data on truly first sync (no existing sync state)
+            // NOT when token is just expired - we have valid data, just need refresh
+            if !has_existing_sync {
+                info!("[SYNC] First sync ever - clearing any stale data");
+
+                // Clear store and search index on background thread
+                let store_for_clear = store.clone();
+                let search_index_for_clear = search_index.clone();
+                let clear_result = background
+                    .spawn(async move {
+                        // Clear mail data (but not sync state yet - that's managed by sync_gmail)
+                        store_for_clear.clear()?;
+                        info!("[SYNC] Cleared mail store");
+
+                        // Clear search index
+                        if let Some(ref index) = search_index_for_clear {
+                            index.clear()?;
+                            info!("[SYNC] Cleared search index");
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    })
+                    .await;
+
+                if let Err(e) = clear_result {
+                    error!("[SYNC] Failed to clear data: {}", e);
+                    cx.update(|cx| {
+                        this.update(cx, |app, cx| {
+                            app.sync_error = Some(format!("Failed to clear data: {}", e));
+                            app.is_syncing = false;
+                            cx.notify();
+                        })
+                    })
+                    .ok();
+                    return;
                 }
             }
-        })
-        .detach();
 
-        // Spawn process phase - runs concurrently, processes messages as they become available
-        let store_for_process = store.clone();
-        let search_index_for_process = search_index.clone();
+            // Save partial sync state immediately with history_id
+            // This ensures incremental sync works even if app crashes during sync
+            // Must be after clear (which deletes sync_state) but before fetch starts
+            if let Some(ref history_id) = history_id {
+                let partial_state = SyncState::partial("default", history_id);
+                if let Err(e) = store.save_sync_state(partial_state) {
+                    warn!("[SYNC] Failed to save partial sync state: {}", e);
+                } else {
+                    info!(
+                        "[SYNC] Saved partial sync state with history_id: {}",
+                        history_id
+                    );
+                }
+            }
 
-        cx.spawn(async move |this, cx| {
-            debug!("[SYNC] Starting process phase (concurrent with fetch)...");
-            let options = SyncOptions {
-                search_index: search_index_for_process,
-                ..Default::default()
-            };
-            let mut stats = SyncStats::default();
+            // Track when fetch phase is done
+            let fetch_done = Arc::new(AtomicBool::new(false));
+            let fetch_error = Arc::new(std::sync::Mutex::new(None::<String>));
+
+            // Start fetch phase in background (runs in parallel with process)
+            debug!("[SYNC] Starting fetch phase (parallel)...");
+            let store_for_fetch = store.clone();
+            let client_clone = client.clone();
+            let options_clone = options.clone();
+            let fetch_done_clone = fetch_done.clone();
+            let fetch_error_clone = fetch_error.clone();
+
+            background
+                .spawn(async move {
+                    let mut fetch_stats = SyncStats::default();
+                    match fetch_phase(
+                        &client_clone,
+                        store_for_fetch.as_ref(),
+                        &options_clone,
+                        &mut fetch_stats,
+                    ) {
+                        Ok(stats) => {
+                            debug!(
+                                "[SYNC] Fetch phase complete: {} fetched, {} pending",
+                                stats.fetched, stats.pending
+                            );
+                        }
+                        Err(e) => {
+                            error!("[SYNC] Fetch phase failed: {}", e);
+                            *fetch_error_clone.lock().unwrap() =
+                                Some(format!("Fetch failed: {}", e));
+                        }
+                    }
+                    fetch_done_clone.store(true, Ordering::SeqCst);
+                })
+                .detach();
+
+            // Process pending messages in batches (runs in parallel with fetch)
+            debug!("[SYNC] Starting process phase (parallel)...");
             let batch_size = 100;
+            let mut stats = SyncStats::default();
+            let mut consecutive_empty = 0;
 
             loop {
-                let store_for_batch = store_for_process.clone();
+                // Check for fetch errors
+                if let Some(err_msg) = fetch_error.lock().unwrap().take() {
+                    cx.update(|cx| {
+                        this.update(cx, |app, cx| {
+                            app.sync_error = Some(err_msg);
+                            app.is_syncing = false;
+                            cx.notify();
+                        })
+                    })
+                    .ok();
+                    return;
+                }
+
+                let store_for_batch = store.clone();
                 let options_clone = options.clone();
                 let mut batch_stats = stats.clone();
 
@@ -805,7 +916,8 @@ impl OrionApp {
                             &options_clone,
                             &mut batch_stats,
                             batch_size,
-                        ).map(|result| (result, batch_stats))
+                        )
+                        .map(|result| (result, batch_stats))
                     })
                     .await;
 
@@ -814,30 +926,65 @@ impl OrionApp {
                         stats = updated_stats;
                         let processed = result.processed;
                         let remaining = result.remaining;
-                        let fetch_still_running = fetch_active_for_process.load(Ordering::SeqCst);
 
                         if processed > 0 {
+                            consecutive_empty = 0;
                             // Update UI with new data
                             cx.update(|cx| {
                                 this.update(cx, |app, cx| {
                                     if let Some(thread_list) = &app.thread_list_view {
                                         thread_list.update(cx, |view, cx| view.load_threads(cx));
                                     }
-                                    debug!("[SYNC] Processed {} messages, {} remaining (fetch active: {})",
-                                        processed, remaining, fetch_still_running);
+                                    debug!(
+                                        "[SYNC] Processed {} messages, {} remaining",
+                                        processed, remaining
+                                    );
                                     cx.notify();
                                 })
-                            }).ok();
+                            })
+                            .ok();
                         } else {
-                            // No messages processed this batch
-                            if remaining == 0 && !fetch_still_running {
-                                // Fetch is done and no pending messages - we're complete
+                            consecutive_empty += 1;
+                        }
+
+                        // Exit conditions:
+                        // 1. No more messages AND fetch is done AND fresh count confirms empty
+                        // 2. Multiple consecutive empty batches AND fetch is done (belt and suspenders)
+                        let is_fetch_done = fetch_done.load(Ordering::SeqCst);
+                        if !result.has_more && is_fetch_done {
+                            // Race condition guard: fetch may have added messages after our
+                            // count check but before setting fetch_done. Do a fresh check.
+                            let store_for_check = store.clone();
+                            let final_pending = background
+                                .spawn(async move {
+                                    store_for_check.count_pending_messages(None).unwrap_or(0)
+                                })
+                                .await;
+
+                            if final_pending == 0 {
                                 debug!("[SYNC] No more pending messages and fetch complete");
                                 break;
+                            } else {
+                                debug!(
+                                    "[SYNC] Found {} pending after fetch completed, continuing",
+                                    final_pending
+                                );
+                                // Don't break - continue processing the remaining messages
                             }
+                        }
 
-                            // Wait a bit before checking again
-                            gpui::Timer::after(std::time::Duration::from_millis(250)).await;
+                        // If no pending but fetch still running, wait a bit before polling again
+                        if !result.has_more && !is_fetch_done {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+
+                        // Safety valve: if we've had many empty batches in a row
+                        if consecutive_empty > 100 && is_fetch_done {
+                            debug!(
+                                "[SYNC] Safety exit after {} empty batches",
+                                consecutive_empty
+                            );
+                            break;
                         }
                     }
                     Err(e) => {
@@ -847,9 +994,24 @@ impl OrionApp {
                                 app.sync_error = Some(format!("Process failed: {}", e));
                                 cx.notify();
                             })
-                        }).ok();
+                        })
+                        .ok();
                         break;
                     }
+                }
+            }
+
+            // Mark sync state as complete
+            // This updates the partial state saved at the start to indicate sync finished
+            if let Some(ref history_id) = history_id {
+                let complete_state = SyncState::new("default", history_id);
+                if let Err(e) = store.save_sync_state(complete_state) {
+                    error!("[SYNC] Failed to mark sync complete: {}", e);
+                } else {
+                    info!(
+                        "[SYNC] Marked sync complete with history_id: {}",
+                        history_id
+                    );
                 }
             }
 
@@ -861,8 +1023,7 @@ impl OrionApp {
 
                     info!(
                         "Sync complete: {} created, {} skipped",
-                        stats.messages_created,
-                        stats.messages_skipped,
+                        stats.messages_created, stats.messages_skipped,
                     );
 
                     // Final reload
@@ -871,7 +1032,8 @@ impl OrionApp {
                     }
                     cx.notify();
                 })
-            }).ok();
+            })
+            .ok();
         })
         .detach();
     }
@@ -973,7 +1135,10 @@ impl OrionApp {
                     )
                     // Profile row
                     .child({
-                        let email = self.profile_email.clone().unwrap_or_else(|| "...".to_string());
+                        let email = self
+                            .profile_email
+                            .clone()
+                            .unwrap_or_else(|| "...".to_string());
                         let avatar_letter = email
                             .chars()
                             .next()
@@ -1131,7 +1296,12 @@ fn format_relative_time(ts: DateTime<Utc>) -> String {
 }
 
 impl OrionApp {
-    fn handle_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_focus_search(
+        &mut self,
+        _: &FocusSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_search(window, cx);
     }
 

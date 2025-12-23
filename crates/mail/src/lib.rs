@@ -26,7 +26,10 @@ pub use gmail::{GmailAuth, GmailClient, HistoryExpiredError, api::ProfileRespons
 pub use models::{label_icon, label_sort_order, EmailAddress, Label, LabelId, Message, MessageId, SyncState, Thread, ThreadId};
 pub use query::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads, list_threads_by_label};
 pub use search::{FieldHighlight, HighlightSpan, ParsedQuery, SearchIndex, SearchResult, parse_query, search_threads};
-pub use storage::{HeedMailStore, InMemoryMailStore, MailStore, PendingMessage, RedbMailStore};
+pub use storage::{
+    BlobKey, BlobStore, ContentType, FileBlobStore, InMemoryMailStore, MailStore,
+    MessageBody, MessageMetadata, PendingMessage, SqliteMailStore,
+};
 pub use sync::{
     FetchPhaseStats, ProcessBatchResult, SyncOptions, SyncStats, SyncTiming,
     fetch_phase, process_pending_batch, sync_gmail, sync_inbox,

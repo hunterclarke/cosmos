@@ -79,10 +79,15 @@ impl GmailClient {
             url.push_str(&format!("&labelIds={}", label));
         }
 
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call()
-            .context("Failed to send list messages request")?;
+        let mut response = with_retry(
+            || {
+                ureq::get(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .call()
+            },
+            3,
+        )
+        .context("Failed to send list messages request")?;
 
         let list: ListMessagesResponse = response
             .body_mut()
@@ -169,10 +174,15 @@ impl GmailClient {
             id.as_str()
         );
 
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call()
-            .context("Failed to send get message request")?;
+        let mut response = with_retry(
+            || {
+                ureq::get(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .call()
+            },
+            3,
+        )
+        .context("Failed to send get message request")?;
 
         let message: GmailMessage = response
             .body_mut()
@@ -260,14 +270,21 @@ impl GmailClient {
                 let batch_results =
                     self.fetch_batch(&access_token, &pending_ids, batch_idx + 1, num_batches);
 
-                // Process results, separating successes from rate limits
+                // Process results, separating successes from retriable errors
+                // Retry: 408 (timeout), 429 (rate limit), 5xx (server errors)
                 let mut next_pending = Vec::new();
                 for ((chunk_idx, id), result) in pending.into_iter().zip(batch_results) {
-                    let is_rate_limited = result
-                        .as_ref()
-                        .is_err_and(|e| e.to_string().contains("429"));
+                    let is_retriable = result.as_ref().is_err_and(|e| {
+                        let msg = e.to_string();
+                        msg.contains("408")
+                            || msg.contains("429")
+                            || msg.contains("500")
+                            || msg.contains("502")
+                            || msg.contains("503")
+                            || msg.contains("504")
+                    });
 
-                    if is_rate_limited {
+                    if is_retriable {
                         next_pending.push((chunk_idx, id));
                     } else {
                         results[chunk_start + chunk_idx] = Some(result);
@@ -368,9 +385,15 @@ impl GmailClient {
                 self.parse_batch_response(&content_type, &response_body, ids)
             }
             Err(e) => {
-                // Return error for all messages in this batch
+                // Extract status code for retry logic if available
+                let error_msg = match &e {
+                    ureq::Error::StatusCode(code) => {
+                        format!("Batch request failed ({}): {}", code, e)
+                    }
+                    _ => format!("Batch request failed: {}", e),
+                };
                 ids.iter()
-                    .map(|_| Err(anyhow::anyhow!("Batch request failed: {}", e)))
+                    .map(|_| Err(anyhow::anyhow!("{}", error_msg)))
                     .collect()
             }
         }
@@ -453,13 +476,26 @@ impl GmailClient {
                         trimmed.starts_with("\"error\"")
                     };
                     if is_error {
-                        if json.contains("429") || json.contains("Too many") {
-                            results.push(Err(anyhow::anyhow!("Rate limited (429)")));
+                        // Extract status code from error for retry logic
+                        // Retriable: 408, 429, 500, 502, 503, 504
+                        let error_msg = if json.contains("429") || json.contains("Too many") {
+                            "Rate limited (429)"
+                        } else if json.contains("503") {
+                            "Service unavailable (503)"
+                        } else if json.contains("502") {
+                            "Bad gateway (502)"
+                        } else if json.contains("500") {
+                            "Internal server error (500)"
+                        } else if json.contains("504") {
+                            "Gateway timeout (504)"
+                        } else if json.contains("408") {
+                            "Request timeout (408)"
                         } else {
                             let preview: String = json.chars().take(100).collect();
                             warn!("Gmail API error: {}", preview);
-                            results.push(Err(anyhow::anyhow!("API error")));
-                        }
+                            "API error"
+                        };
+                        results.push(Err(anyhow::anyhow!("{}", error_msg)));
                         continue;
                     }
 
@@ -608,10 +644,15 @@ impl GmailClient {
 
         let url = format!("{}/users/me/labels", Self::BASE_URL);
 
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call()
-            .context("Failed to send list labels request")?;
+        let mut response = with_retry(
+            || {
+                ureq::get(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .call()
+            },
+            3,
+        )
+        .context("Failed to send list labels request")?;
 
         let labels: ListLabelsResponse = response
             .body_mut()
@@ -652,24 +693,38 @@ impl GmailClient {
             url.push_str(&format!("&pageToken={}", token));
         }
 
-        let response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call();
+        // Retry loop with special handling for history expired errors
+        let mut delay = Duration::from_millis(100);
+        let max_retries = 3u32;
 
-        match response {
-            Ok(mut resp) => {
-                let history: HistoryResponse = resp
-                    .body_mut()
-                    .read_json()
-                    .context("Failed to parse history response")?;
-                Ok(history)
+        for attempt in 0..max_retries {
+            let response = ureq::get(&url)
+                .header("Authorization", &format!("Bearer {}", access_token))
+                .call();
+
+            match response {
+                Ok(mut resp) => {
+                    let history: HistoryResponse = resp
+                        .body_mut()
+                        .read_json()
+                        .context("Failed to parse history response")?;
+                    return Ok(history);
+                }
+                Err(ureq::Error::StatusCode(404)) | Err(ureq::Error::StatusCode(400)) => {
+                    // History ID expired, invalid, or malformed - triggers full resync
+                    // Don't retry these, they're not transient
+                    return Err(HistoryExpiredError.into());
+                }
+                Err(ref e) if is_retriable_error(e) && attempt < max_retries - 1 => {
+                    let jitter = Duration::from_millis(rand_jitter());
+                    std::thread::sleep(delay + jitter);
+                    delay = (delay * 2).min(Duration::from_secs(16));
+                }
+                Err(e) => return Err(anyhow::anyhow!("Failed to fetch history: {}", e)),
             }
-            Err(ureq::Error::StatusCode(404)) | Err(ureq::Error::StatusCode(400)) => {
-                // History ID expired, invalid, or malformed - triggers full resync
-                Err(HistoryExpiredError.into())
-            }
-            Err(e) => Err(anyhow::anyhow!("Failed to fetch history: {}", e)),
         }
+
+        Err(anyhow::anyhow!("Failed to fetch history after {} retries", max_retries))
     }
 
     /// List all history pages since a given historyId
@@ -722,10 +777,15 @@ impl GmailClient {
 
         let url = format!("{}/users/me/profile", Self::BASE_URL);
 
-        let mut response = ureq::get(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .call()
-            .context("Failed to get Gmail profile")?;
+        let mut response = with_retry(
+            || {
+                ureq::get(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .call()
+            },
+            3,
+        )
+        .context("Failed to get Gmail profile")?;
 
         let profile: ProfileResponse = response
             .body_mut()
@@ -770,11 +830,16 @@ impl GmailClient {
             remove_label_ids: remove_labels.iter().map(|s| s.to_string()).collect(),
         };
 
-        let mut response = ureq::post(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .send_json(&request)
-            .context("Failed to send modify message request")?;
+        let mut response = with_retry(
+            || {
+                ureq::post(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .send_json(&request)
+            },
+            3,
+        )
+        .context("Failed to send modify message request")?;
 
         let message: GmailMessage = response
             .body_mut()
@@ -818,11 +883,16 @@ impl GmailClient {
             remove_label_ids: remove_labels.iter().map(|s| s.to_string()).collect(),
         };
 
-        ureq::post(&url)
-            .header("Authorization", &format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .send_json(&request)
-            .context("Failed to send batch modify request")?;
+        with_retry(
+            || {
+                ureq::post(&url)
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .send_json(&request)
+            },
+            3,
+        )
+        .context("Failed to send batch modify request")?;
 
         info!(
             "Batch modified {} messages: +{:?} -{:?}",
@@ -842,4 +912,39 @@ fn rand_jitter() -> u64 {
 
     let hasher = RandomState::new().build_hasher();
     hasher.finish() % 100
+}
+
+/// Check if an error is retriable (transient server error)
+fn is_retriable_error(e: &ureq::Error) -> bool {
+    matches!(
+        e,
+        ureq::Error::StatusCode(408)  // Request Timeout
+            | ureq::Error::StatusCode(429)  // Too Many Requests
+            | ureq::Error::StatusCode(500)  // Internal Server Error
+            | ureq::Error::StatusCode(502)  // Bad Gateway
+            | ureq::Error::StatusCode(503)  // Service Unavailable
+            | ureq::Error::StatusCode(504)  // Gateway Timeout
+    )
+}
+
+/// Execute an HTTP request with retry for transient errors
+fn with_retry<T, F>(mut f: F, max_retries: u32) -> Result<T>
+where
+    F: FnMut() -> std::result::Result<T, ureq::Error>,
+{
+    let mut delay = Duration::from_millis(100);
+
+    for attempt in 0..max_retries {
+        match f() {
+            Ok(result) => return Ok(result),
+            Err(e) if is_retriable_error(&e) && attempt < max_retries - 1 => {
+                let jitter = Duration::from_millis(rand_jitter());
+                std::thread::sleep(delay + jitter);
+                delay = (delay * 2).min(Duration::from_secs(16));
+            }
+            Err(e) => return Err(anyhow::anyhow!("{}", e)),
+        }
+    }
+
+    unreachable!()
 }

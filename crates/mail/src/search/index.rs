@@ -199,6 +199,16 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Clear all documents from the index
+    pub fn clear(&self) -> Result<()> {
+        let mut writer_guard = self.get_writer()?;
+        let writer = writer_guard.as_mut().unwrap();
+        writer.delete_all_documents()?;
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
     /// Search for threads matching the query
     ///
     /// Returns deduplicated results by thread_id, sorted by relevance score.
@@ -446,9 +456,9 @@ impl SearchIndex {
         let threads = store.list_threads(100_000, 0)?;
 
         for thread in threads {
-            let messages = store.list_messages_for_thread(&thread.id)?;
-            for message in messages {
-                self.index_message(&message, &thread)?;
+            let messages = store.list_messages_for_thread_with_bodies(&thread.id)?;
+            for message in &messages {
+                self.index_message(message, &thread)?;
                 count += 1;
             }
         }

@@ -8,7 +8,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
-use super::{MailStore, PendingMessage};
+use super::traits::{MailStore, MessageBody, MessageMetadata, PendingMessage};
 use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
 
 /// In-memory implementation of MailStore
@@ -143,6 +143,19 @@ impl MailStore for InMemoryMailStore {
         Ok(messages.get(&id.0).cloned())
     }
 
+    fn get_message_metadata(&self, id: &MessageId) -> Result<Option<MessageMetadata>> {
+        let messages = self.messages.read().unwrap();
+        Ok(messages.get(&id.0).map(|m| MessageMetadata::from(m)))
+    }
+
+    fn get_message_body(&self, id: &MessageId) -> Result<Option<MessageBody>> {
+        let messages = self.messages.read().unwrap();
+        Ok(messages.get(&id.0).map(|m| MessageBody {
+            text: m.body_text.clone(),
+            html: m.body_html.clone(),
+        }))
+    }
+
     fn list_threads(&self, limit: usize, offset: usize) -> Result<Vec<Thread>> {
         let threads = self.threads.read().unwrap();
         let mut thread_list: Vec<_> = threads.values().cloned().collect();
@@ -181,7 +194,30 @@ impl MailStore for InMemoryMailStore {
         Ok(result)
     }
 
-    fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<Message>> {
+    fn list_messages_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<MessageMetadata>> {
+        let thread_messages = self.thread_messages.read().unwrap();
+        let messages = self.messages.read().unwrap();
+
+        let mut result = Vec::new();
+
+        if let Some(msg_ids) = thread_messages.get(&thread_id.0) {
+            for msg_id in msg_ids {
+                if let Some(msg) = messages.get(msg_id) {
+                    result.push(MessageMetadata::from(msg));
+                }
+            }
+        }
+
+        // Sort by received_at ascending
+        result.sort_by(|a, b| a.received_at.cmp(&b.received_at));
+
+        Ok(result)
+    }
+
+    fn list_messages_for_thread_with_bodies(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<Message>> {
         let thread_messages = self.thread_messages.read().unwrap();
         let messages = self.messages.read().unwrap();
 
