@@ -6,6 +6,10 @@
 mod inbox;
 
 pub use inbox::{
+    // Sync execution
     FetchPhaseStats, ProcessBatchResult, SyncOptions, SyncStats, SyncTiming,
     fetch_phase, process_pending_batch, sync_gmail,
+    // Sync decision (testable)
+    SyncAction, SyncStateInfo, ResumeProgress,
+    determine_sync_action, should_auto_sync_on_startup, get_sync_state_info,
 };

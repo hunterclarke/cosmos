@@ -4,7 +4,7 @@
 //! Syncs the user's entire email library (all labels/folders).
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use log::{info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,6 +14,148 @@ use crate::gmail::{api::GmailMessage, normalize_message, GmailClient, HistoryExp
 use crate::models::{LabelId, Message, MessageId, SyncState, Thread, ThreadId};
 use crate::search::SearchIndex;
 use crate::storage::{MailStore, MessageMetadata};
+
+/// The action that should be taken when syncing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncAction {
+    /// Start a fresh initial sync (no existing state or force resync)
+    InitialSync,
+    /// Resume an incomplete initial sync from saved checkpoint
+    ResumeInitialSync {
+        /// Page token to resume listing from (None = start from beginning)
+        page_token: Option<String>,
+        /// Number of messages already listed
+        messages_listed: usize,
+        /// Message IDs that failed previously and need retry
+        failed_message_ids: Vec<String>,
+    },
+    /// Perform incremental sync using History API
+    IncrementalSync {
+        /// History ID to sync from
+        history_id: String,
+    },
+    /// Full resync needed due to stale history ID (> 5 days old)
+    StaleResync {
+        /// How many days since last sync
+        days_since_sync: i64,
+    },
+}
+
+/// Determines what sync action should be taken based on current state
+///
+/// This is a pure function that examines the sync state and returns
+/// the appropriate action. It does not perform any I/O.
+///
+/// # Arguments
+/// * `sync_state` - Current sync state from storage (None if never synced)
+/// * `force_resync` - Whether to force a full resync regardless of state
+///
+/// # Returns
+/// The sync action that should be taken
+pub fn determine_sync_action(sync_state: Option<&SyncState>, force_resync: bool) -> SyncAction {
+    // Force resync requested
+    if force_resync {
+        return SyncAction::InitialSync;
+    }
+
+    match sync_state {
+        // No sync state - start fresh
+        None => SyncAction::InitialSync,
+
+        // Incomplete initial sync - resume it
+        Some(state) if !state.initial_sync_complete => SyncAction::ResumeInitialSync {
+            page_token: state.fetch_page_token.clone(),
+            messages_listed: state.messages_listed,
+            failed_message_ids: state.failed_message_ids.clone(),
+        },
+
+        // Complete sync state - check staleness
+        Some(state) => {
+            let age = Utc::now() - state.last_sync_at;
+            let days = age.num_days();
+
+            if days >= 5 {
+                // History ID likely expired or about to expire
+                SyncAction::StaleResync {
+                    days_since_sync: days,
+                }
+            } else {
+                // Recent enough for incremental sync
+                SyncAction::IncrementalSync {
+                    history_id: state.history_id.clone(),
+                }
+            }
+        }
+    }
+}
+
+/// Checks if an app should auto-start sync on startup
+///
+/// Returns true if:
+/// - There's an incomplete initial sync that needs to be resumed
+/// - OR there's no sync state at all (first time)
+///
+/// # Arguments
+/// * `sync_state` - Current sync state from storage
+pub fn should_auto_sync_on_startup(sync_state: Option<&SyncState>) -> bool {
+    match sync_state {
+        None => true, // Never synced
+        Some(state) => !state.initial_sync_complete, // Incomplete sync
+    }
+}
+
+/// Returns details about the sync state for logging/display
+#[derive(Debug, Clone)]
+pub struct SyncStateInfo {
+    /// Whether a sync has ever completed
+    pub has_completed_sync: bool,
+    /// Whether initial sync is incomplete and needs resume
+    pub needs_resume: bool,
+    /// Last sync timestamp (if any)
+    pub last_sync_at: Option<DateTime<Utc>>,
+    /// Resume progress (if resuming)
+    pub resume_progress: Option<ResumeProgress>,
+}
+
+/// Progress information for resuming a sync
+#[derive(Debug, Clone)]
+pub struct ResumeProgress {
+    /// Whether we have a page token to resume from
+    pub has_page_token: bool,
+    /// Number of messages already listed
+    pub messages_listed: usize,
+    /// Number of failed message IDs to retry
+    pub failed_message_count: usize,
+}
+
+/// Get information about current sync state
+pub fn get_sync_state_info(sync_state: Option<&SyncState>) -> SyncStateInfo {
+    match sync_state {
+        None => SyncStateInfo {
+            has_completed_sync: false,
+            needs_resume: false,
+            last_sync_at: None,
+            resume_progress: None,
+        },
+        Some(state) => {
+            let needs_resume = !state.initial_sync_complete;
+            SyncStateInfo {
+                has_completed_sync: state.initial_sync_complete,
+                needs_resume,
+                last_sync_at: Some(state.last_sync_at),
+                resume_progress: if needs_resume {
+                    Some(ResumeProgress {
+                        has_page_token: state.fetch_page_token.is_some(),
+                        messages_listed: state.messages_listed,
+                        failed_message_count: state.failed_message_ids.len(),
+                    })
+                } else {
+                    None
+                },
+            }
+        }
+    }
+}
 
 /// Options for sync operation
 #[derive(Debug, Clone, Default)]
@@ -1150,5 +1292,245 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats.messages_stored(), 8);
+    }
+
+    // === Sync Decision Tests ===
+
+    #[test]
+    fn test_determine_sync_action_no_state() {
+        let action = determine_sync_action(None, false);
+        assert_eq!(action, SyncAction::InitialSync);
+    }
+
+    #[test]
+    fn test_determine_sync_action_force_resync() {
+        // Even with existing complete state, force_resync should return InitialSync
+        let state = SyncState::new("user@gmail.com", "12345");
+        let action = determine_sync_action(Some(&state), true);
+        assert_eq!(action, SyncAction::InitialSync);
+    }
+
+    #[test]
+    fn test_determine_sync_action_incomplete_sync() {
+        // Incomplete initial sync with checkpoint
+        let mut state = SyncState::partial("user@gmail.com", "12345");
+        state.fetch_page_token = Some("page_token_abc".to_string());
+        state.messages_listed = 5000;
+        state.failed_message_ids = vec!["msg1".to_string(), "msg2".to_string()];
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::ResumeInitialSync {
+                page_token,
+                messages_listed,
+                failed_message_ids,
+            } => {
+                assert_eq!(page_token, Some("page_token_abc".to_string()));
+                assert_eq!(messages_listed, 5000);
+                assert_eq!(failed_message_ids, vec!["msg1", "msg2"]);
+            }
+            _ => panic!("Expected ResumeInitialSync, got {:?}", action),
+        }
+    }
+
+    #[test]
+    fn test_determine_sync_action_incomplete_sync_no_checkpoint() {
+        // Incomplete sync but no page token yet (just started)
+        let state = SyncState::partial("user@gmail.com", "12345");
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::ResumeInitialSync {
+                page_token,
+                messages_listed,
+                failed_message_ids,
+            } => {
+                assert_eq!(page_token, None);
+                assert_eq!(messages_listed, 0);
+                assert!(failed_message_ids.is_empty());
+            }
+            _ => panic!("Expected ResumeInitialSync, got {:?}", action),
+        }
+    }
+
+    #[test]
+    fn test_determine_sync_action_recent_complete_sync() {
+        // Recently completed sync should use incremental
+        let state = SyncState::new("user@gmail.com", "12345");
+        // state.last_sync_at is set to now() by default
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::IncrementalSync { history_id } => {
+                assert_eq!(history_id, "12345");
+            }
+            _ => panic!("Expected IncrementalSync, got {:?}", action),
+        }
+    }
+
+    #[test]
+    fn test_determine_sync_action_stale_sync() {
+        // Sync from 6 days ago should trigger StaleResync
+        let mut state = SyncState::new("user@gmail.com", "12345");
+        state.last_sync_at = Utc::now() - chrono::Duration::days(6);
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::StaleResync { days_since_sync } => {
+                assert_eq!(days_since_sync, 6);
+            }
+            _ => panic!("Expected StaleResync, got {:?}", action),
+        }
+    }
+
+    #[test]
+    fn test_determine_sync_action_boundary_4_days() {
+        // 4 days is still fresh enough for incremental
+        let mut state = SyncState::new("user@gmail.com", "12345");
+        state.last_sync_at = Utc::now() - chrono::Duration::days(4);
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::IncrementalSync { .. } => {}
+            _ => panic!("Expected IncrementalSync at 4 days, got {:?}", action),
+        }
+    }
+
+    #[test]
+    fn test_determine_sync_action_boundary_5_days() {
+        // 5 days is the threshold for stale
+        let mut state = SyncState::new("user@gmail.com", "12345");
+        state.last_sync_at = Utc::now() - chrono::Duration::days(5);
+
+        let action = determine_sync_action(Some(&state), false);
+
+        match action {
+            SyncAction::StaleResync { .. } => {}
+            _ => panic!("Expected StaleResync at 5 days, got {:?}", action),
+        }
+    }
+
+    // === Auto-Sync on Startup Tests ===
+
+    #[test]
+    fn test_should_auto_sync_no_state() {
+        assert!(should_auto_sync_on_startup(None));
+    }
+
+    #[test]
+    fn test_should_auto_sync_incomplete() {
+        let state = SyncState::partial("user@gmail.com", "12345");
+        assert!(should_auto_sync_on_startup(Some(&state)));
+    }
+
+    #[test]
+    fn test_should_not_auto_sync_complete() {
+        let state = SyncState::new("user@gmail.com", "12345");
+        assert!(!should_auto_sync_on_startup(Some(&state)));
+    }
+
+    #[test]
+    fn test_should_not_auto_sync_complete_stale() {
+        // Even if stale, a completed sync shouldn't auto-start
+        // (user can manually sync if they want)
+        let mut state = SyncState::new("user@gmail.com", "12345");
+        state.last_sync_at = Utc::now() - chrono::Duration::days(10);
+        assert!(!should_auto_sync_on_startup(Some(&state)));
+    }
+
+    // === Sync State Info Tests ===
+
+    #[test]
+    fn test_sync_state_info_no_state() {
+        let info = get_sync_state_info(None);
+        assert!(!info.has_completed_sync);
+        assert!(!info.needs_resume);
+        assert!(info.last_sync_at.is_none());
+        assert!(info.resume_progress.is_none());
+    }
+
+    #[test]
+    fn test_sync_state_info_complete() {
+        let state = SyncState::new("user@gmail.com", "12345");
+        let info = get_sync_state_info(Some(&state));
+
+        assert!(info.has_completed_sync);
+        assert!(!info.needs_resume);
+        assert!(info.last_sync_at.is_some());
+        assert!(info.resume_progress.is_none());
+    }
+
+    #[test]
+    fn test_sync_state_info_incomplete_with_progress() {
+        let mut state = SyncState::partial("user@gmail.com", "12345");
+        state.fetch_page_token = Some("token".to_string());
+        state.messages_listed = 1000;
+        state.failed_message_ids = vec!["m1".to_string()];
+
+        let info = get_sync_state_info(Some(&state));
+
+        assert!(!info.has_completed_sync);
+        assert!(info.needs_resume);
+        assert!(info.last_sync_at.is_some());
+
+        let progress = info.resume_progress.unwrap();
+        assert!(progress.has_page_token);
+        assert_eq!(progress.messages_listed, 1000);
+        assert_eq!(progress.failed_message_count, 1);
+    }
+
+    // === State Transitions Tests ===
+
+    #[test]
+    fn test_sync_state_lifecycle() {
+        // Test the full lifecycle of sync state
+
+        // 1. Start: no state
+        let action1 = determine_sync_action(None, false);
+        assert_eq!(action1, SyncAction::InitialSync);
+
+        // 2. Initial sync started but not finished
+        let partial = SyncState::partial("user@gmail.com", "history_100");
+        let action2 = determine_sync_action(Some(&partial), false);
+        assert!(matches!(action2, SyncAction::ResumeInitialSync { .. }));
+
+        // 3. Initial sync completed
+        let complete = partial.mark_complete();
+        let action3 = determine_sync_action(Some(&complete), false);
+        assert!(matches!(action3, SyncAction::IncrementalSync { .. }));
+
+        // 4. After incremental sync updates history_id
+        let updated = complete.updated("history_200");
+        let action4 = determine_sync_action(Some(&updated), false);
+        match action4 {
+            SyncAction::IncrementalSync { history_id } => {
+                assert_eq!(history_id, "history_200");
+            }
+            _ => panic!("Expected IncrementalSync with new history_id"),
+        }
+    }
+
+    #[test]
+    fn test_sync_state_checkpoint_preservation() {
+        // Verify that checkpoints are preserved through state transitions
+        let mut state = SyncState::partial("user@gmail.com", "history_100");
+        state = state.with_fetch_progress(Some("page_xyz".to_string()), 5000);
+        state = state.with_failed_ids(vec!["msg1".to_string(), "msg2".to_string()]);
+
+        // Checkpoint should be preserved
+        assert_eq!(state.fetch_page_token, Some("page_xyz".to_string()));
+        assert_eq!(state.messages_listed, 5000);
+        assert_eq!(state.failed_message_ids.len(), 2);
+
+        // After mark_complete, checkpoints should be cleared
+        let completed = state.mark_complete();
+        assert!(completed.fetch_page_token.is_none());
+        assert_eq!(completed.messages_listed, 0);
+        assert!(completed.failed_message_ids.is_empty());
     }
 }

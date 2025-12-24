@@ -3,9 +3,11 @@
 //! These tests verify the complete flow from syncing to querying.
 
 use chrono::Utc;
-use mail::models::{EmailAddress, Message, MessageId, Thread, ThreadId};
+use mail::models::{EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
 use mail::query::{get_thread_detail, list_threads};
-use mail::storage::{InMemoryMailStore, MailStore};
+use mail::storage::{FileBlobStore, InMemoryMailStore, MailStore, SqliteMailStore};
+use mail::{SyncAction, determine_sync_action, get_sync_state_info, should_auto_sync_on_startup};
+use tempfile::TempDir;
 
 /// Helper to create test messages
 fn make_message(id: &str, thread_id: &str, subject: &str, age_hours: i64) -> Message {
@@ -232,4 +234,246 @@ fn test_clear_store() {
 
     assert_eq!(store.count_threads().unwrap(), 0);
     assert!(!store.has_message(&MessageId::new("m1")).unwrap());
+}
+
+// === SQLite Sync State Persistence Tests ===
+
+fn create_sqlite_store() -> (SqliteMailStore, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    // Use .test.sqlite extension to clearly distinguish from production databases
+    let db_path = temp_dir.path().join("mail.test.sqlite");
+    let blob_path = temp_dir.path().join("blobs.test");
+    let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+    let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+    (store, temp_dir)
+}
+
+#[test]
+fn test_sqlite_sync_state_persistence() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Initially no sync state
+    assert!(store.get_sync_state("default").unwrap().is_none());
+
+    // Save partial sync state (simulating start of initial sync)
+    let partial = SyncState::partial("default", "history_12345");
+    store.save_sync_state(partial.clone()).unwrap();
+
+    // Verify it persists
+    let retrieved = store.get_sync_state("default").unwrap().unwrap();
+    assert_eq!(retrieved.account_id, "default");
+    assert_eq!(retrieved.history_id, "history_12345");
+    assert!(!retrieved.initial_sync_complete);
+}
+
+#[test]
+fn test_sqlite_sync_checkpoint_persistence() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Save partial state with checkpoint
+    let mut state = SyncState::partial("default", "history_100");
+    state = state.with_fetch_progress(Some("page_token_xyz".to_string()), 5000);
+    state = state.with_failed_ids(vec!["msg1".to_string(), "msg2".to_string(), "msg3".to_string()]);
+    store.save_sync_state(state).unwrap();
+
+    // Retrieve and verify checkpoint data
+    let retrieved = store.get_sync_state("default").unwrap().unwrap();
+    assert_eq!(retrieved.fetch_page_token, Some("page_token_xyz".to_string()));
+    assert_eq!(retrieved.messages_listed, 5000);
+    assert_eq!(retrieved.failed_message_ids.len(), 3);
+    assert!(retrieved.failed_message_ids.contains(&"msg1".to_string()));
+    assert!(retrieved.failed_message_ids.contains(&"msg2".to_string()));
+    assert!(retrieved.failed_message_ids.contains(&"msg3".to_string()));
+}
+
+#[test]
+fn test_sqlite_sync_state_across_reopens() {
+    let temp_dir = TempDir::new().unwrap();
+    // Use .test.sqlite extension to clearly distinguish from production databases
+    let db_path = temp_dir.path().join("mail.test.sqlite");
+    let blob_path = temp_dir.path().join("blobs.test");
+
+    // Open store, save state, close
+    {
+        let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+        let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+        let mut state = SyncState::partial("default", "history_200");
+        state = state.with_fetch_progress(Some("page_abc".to_string()), 10000);
+        state.failed_message_ids = vec!["fail1".to_string()];
+        store.save_sync_state(state).unwrap();
+    } // store dropped here, connection closed
+
+    // Reopen store and verify state persists
+    {
+        let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+        let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+        let retrieved = store.get_sync_state("default").unwrap().unwrap();
+
+        assert_eq!(retrieved.history_id, "history_200");
+        assert!(!retrieved.initial_sync_complete);
+        assert_eq!(retrieved.fetch_page_token, Some("page_abc".to_string()));
+        assert_eq!(retrieved.messages_listed, 10000);
+        assert_eq!(retrieved.failed_message_ids, vec!["fail1".to_string()]);
+
+        // Verify should_auto_sync detects incomplete sync
+        assert!(should_auto_sync_on_startup(Some(&retrieved)));
+
+        // Verify determine_sync_action returns correct resume info
+        match determine_sync_action(Some(&retrieved), false) {
+            SyncAction::ResumeInitialSync { page_token, messages_listed, failed_message_ids } => {
+                assert_eq!(page_token, Some("page_abc".to_string()));
+                assert_eq!(messages_listed, 10000);
+                assert_eq!(failed_message_ids.len(), 1);
+            }
+            other => panic!("Expected ResumeInitialSync, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_sqlite_complete_sync_lifecycle() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Step 1: Initial state - no sync
+    let state = store.get_sync_state("default").unwrap();
+    assert!(state.is_none());
+    assert!(should_auto_sync_on_startup(state.as_ref()));
+    assert_eq!(determine_sync_action(state.as_ref(), false), SyncAction::InitialSync);
+
+    // Step 2: Start initial sync (partial state)
+    let partial = SyncState::partial("default", "history_100");
+    store.save_sync_state(partial).unwrap();
+
+    let state = store.get_sync_state("default").unwrap();
+    assert!(should_auto_sync_on_startup(state.as_ref()));
+    assert!(matches!(
+        determine_sync_action(state.as_ref(), false),
+        SyncAction::ResumeInitialSync { .. }
+    ));
+
+    // Step 3: Update checkpoint during sync
+    let mut checkpointed = state.unwrap();
+    checkpointed = checkpointed.with_fetch_progress(Some("page_1".to_string()), 500);
+    store.save_sync_state(checkpointed).unwrap();
+
+    // Step 4: More progress
+    let state = store.get_sync_state("default").unwrap().unwrap();
+    let more_progress = state.with_fetch_progress(Some("page_2".to_string()), 1000);
+    store.save_sync_state(more_progress).unwrap();
+
+    // Step 5: Complete sync
+    let state = store.get_sync_state("default").unwrap().unwrap();
+    let complete = state.mark_complete();
+    store.save_sync_state(complete).unwrap();
+
+    let final_state = store.get_sync_state("default").unwrap();
+    assert!(!should_auto_sync_on_startup(final_state.as_ref()));
+    assert!(matches!(
+        determine_sync_action(final_state.as_ref(), false),
+        SyncAction::IncrementalSync { .. }
+    ));
+
+    // Verify checkpoints are cleared after completion
+    let complete_state = final_state.unwrap();
+    assert!(complete_state.initial_sync_complete);
+    assert!(complete_state.fetch_page_token.is_none());
+    assert!(complete_state.failed_message_ids.is_empty());
+    assert_eq!(complete_state.messages_listed, 0);
+}
+
+#[test]
+fn test_sqlite_sync_state_with_mail_data() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Save some mail data
+    store
+        .upsert_thread(make_thread("t1", "Test Thread", 1, 1))
+        .unwrap();
+    store
+        .upsert_message(make_message("m1", "t1", "Test", 1))
+        .unwrap();
+
+    // Save sync state
+    let state = SyncState::new("default", "history_500");
+    store.save_sync_state(state).unwrap();
+
+    // Clear mail data only (not sync state)
+    store.clear_mail_data().unwrap();
+
+    // Mail data should be gone
+    assert_eq!(store.count_threads().unwrap(), 0);
+    assert!(!store.has_message(&MessageId::new("m1")).unwrap());
+
+    // But sync state should still exist
+    let state = store.get_sync_state("default").unwrap();
+    assert!(state.is_some());
+    assert_eq!(state.unwrap().history_id, "history_500");
+}
+
+#[test]
+fn test_sqlite_stale_sync_detection() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Create a sync state from 6 days ago
+    let mut stale_state = SyncState::new("default", "old_history");
+    stale_state.last_sync_at = Utc::now() - chrono::Duration::days(6);
+    store.save_sync_state(stale_state).unwrap();
+
+    let state = store.get_sync_state("default").unwrap();
+
+    // Should NOT auto-sync (completed sync)
+    assert!(!should_auto_sync_on_startup(state.as_ref()));
+
+    // But should recommend stale resync
+    match determine_sync_action(state.as_ref(), false) {
+        SyncAction::StaleResync { days_since_sync } => {
+            assert_eq!(days_since_sync, 6);
+        }
+        other => panic!("Expected StaleResync, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_sqlite_force_resync() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // Create complete sync state
+    let state = SyncState::new("default", "history_999");
+    store.save_sync_state(state).unwrap();
+
+    let state = store.get_sync_state("default").unwrap();
+
+    // Force resync should override everything
+    assert_eq!(
+        determine_sync_action(state.as_ref(), true),
+        SyncAction::InitialSync
+    );
+}
+
+#[test]
+fn test_sync_state_info_with_sqlite() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // No state
+    let info = get_sync_state_info(None);
+    assert!(!info.has_completed_sync);
+    assert!(!info.needs_resume);
+
+    // Partial state with progress
+    let mut partial = SyncState::partial("default", "h1");
+    partial = partial.with_fetch_progress(Some("token".to_string()), 2500);
+    partial.failed_message_ids = vec!["f1".to_string(), "f2".to_string()];
+    store.save_sync_state(partial).unwrap();
+
+    let state = store.get_sync_state("default").unwrap();
+    let info = get_sync_state_info(state.as_ref());
+
+    assert!(!info.has_completed_sync);
+    assert!(info.needs_resume);
+    assert!(info.last_sync_at.is_some());
+
+    let progress = info.resume_progress.unwrap();
+    assert!(progress.has_page_token);
+    assert_eq!(progress.messages_listed, 2500);
+    assert_eq!(progress.failed_message_count, 2);
 }

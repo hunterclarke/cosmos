@@ -31,6 +31,10 @@ pub use storage::{
     MessageBody, MessageMetadata, PendingMessage, SqliteMailStore,
 };
 pub use sync::{
+    // Sync execution
     FetchPhaseStats, ProcessBatchResult, SyncOptions, SyncStats, SyncTiming,
     fetch_phase, process_pending_batch, sync_gmail,
+    // Sync decision (for app startup logic)
+    SyncAction, SyncStateInfo, ResumeProgress,
+    determine_sync_action, should_auto_sync_on_startup, get_sync_state_info,
 };

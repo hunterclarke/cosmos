@@ -1202,8 +1202,9 @@ mod tests {
 
     fn create_test_store() -> (SqliteMailStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let blob_path = dir.path().join("blobs");
+        // Use .test.sqlite extension to clearly distinguish from production databases
+        let db_path = dir.path().join("mail.test.sqlite");
+        let blob_path = dir.path().join("blobs.test");
 
         let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();

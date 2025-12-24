@@ -168,11 +168,9 @@ impl OrionApp {
                     );
 
                     let sync_state = store.get_sync_state("default").ok().flatten();
-                    let last_sync_at = sync_state.as_ref().map(|state| state.last_sync_at);
-                    let needs_resume = sync_state
-                        .as_ref()
-                        .map(|state| !state.initial_sync_complete)
-                        .unwrap_or(false);
+                    let sync_info = mail::get_sync_state_info(sync_state.as_ref());
+                    let last_sync_at = sync_info.last_sync_at;
+                    let should_auto_sync = mail::should_auto_sync_on_startup(sync_state.as_ref());
 
                     let search_index = match Self::create_search_index() {
                         Ok(index) => {
@@ -188,12 +186,12 @@ impl OrionApp {
                         }
                     };
 
-                    Ok((store, last_sync_at, needs_resume, search_index))
+                    Ok((store, last_sync_at, should_auto_sync, sync_info, search_index))
                 })
                 .await;
 
             // Update app state on main thread
-            if let Ok((store, last_sync_at, needs_resume, search_index)) = result {
+            if let Ok((store, last_sync_at, should_auto_sync, sync_info, search_index)) = result {
                 cx.update(|cx| {
                     this.update(cx, |app, cx| {
                         app.store = store.clone();
@@ -221,14 +219,22 @@ impl OrionApp {
                         // Auto-start sync if:
                         // 1. Gmail is configured but we haven't synced yet (first time)
                         // 2. Or there's an incomplete initial sync that needs to be resumed
-                        if app.gmail_client.is_some() {
-                            if needs_resume {
-                                info!("Incomplete initial sync detected, resuming...");
-                                app.sync(cx);
-                            } else if app.last_sync_at.is_none() {
+                        if app.gmail_client.is_some() && should_auto_sync {
+                            if sync_info.needs_resume {
+                                if let Some(ref progress) = sync_info.resume_progress {
+                                    info!(
+                                        "Resuming incomplete sync (page_token={}, messages_listed={}, failed={})",
+                                        progress.has_page_token,
+                                        progress.messages_listed,
+                                        progress.failed_message_count
+                                    );
+                                } else {
+                                    info!("Resuming incomplete initial sync...");
+                                }
+                            } else {
                                 info!("No previous sync found, starting initial sync...");
-                                app.sync(cx);
                             }
+                            app.sync(cx);
                         }
 
                         cx.notify();
@@ -847,12 +853,9 @@ impl OrionApp {
             // If we're resuming an incomplete sync, the existing state has the page_token
             // and failed_message_ids that we need to resume from.
             let existing_sync_state = store.get_sync_state("default").ok().flatten();
-            let is_resuming = existing_sync_state
-                .as_ref()
-                .map(|s| !s.initial_sync_complete)
-                .unwrap_or(false);
+            let sync_info = mail::get_sync_state_info(existing_sync_state.as_ref());
 
-            if !is_resuming {
+            if !sync_info.needs_resume {
                 if let Some(ref history_id) = history_id {
                     let partial_state = SyncState::partial("default", history_id);
                     if let Err(e) = store.save_sync_state(partial_state) {
@@ -864,11 +867,12 @@ impl OrionApp {
                         );
                     }
                 }
-            } else {
+            } else if let Some(ref progress) = sync_info.resume_progress {
                 info!(
-                    "[SYNC] Resuming existing sync (page_token={}, failed_ids={})",
-                    existing_sync_state.as_ref().map(|s| s.fetch_page_token.is_some()).unwrap_or(false),
-                    existing_sync_state.as_ref().map(|s| s.failed_message_ids.len()).unwrap_or(0)
+                    "[SYNC] Resuming existing sync (page_token={}, messages_listed={}, failed_ids={})",
+                    progress.has_page_token,
+                    progress.messages_listed,
+                    progress.failed_message_count
                 );
             }
 
