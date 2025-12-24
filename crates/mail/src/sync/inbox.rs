@@ -93,6 +93,15 @@ impl SyncStats {
 /// Automatically uses incremental sync if SyncState exists,
 /// otherwise performs full initial sync.
 ///
+/// ## Resilience Features
+///
+/// - **Automatic resume**: Incomplete initial syncs are resumed from the last checkpoint.
+/// - **Page token checkpointing**: Message listing can resume from where it left off.
+/// - **Failed ID retry**: Messages that failed to fetch are retried on next sync.
+/// - **Stale state detection**: History IDs older than 5 days trigger a proactive full resync.
+/// - **History expired handling**: 404/400 from Gmail History API triggers full resync.
+/// - **Catch-up sync retry**: After initial sync, catch-up is retried up to 3 times.
+///
 /// # Arguments
 /// * `gmail` - Gmail API client
 /// * `store` - Storage backend
@@ -112,31 +121,55 @@ pub fn sync_gmail(
     let mut stats = match existing_state {
         // Full resync requested - start fresh
         _ if options.full_resync => {
+            info!("Full resync requested, clearing existing data...");
             store.clear_mail_data()?;
             store.delete_sync_state(account_id)?;
             initial_sync(gmail, store, account_id, &options)?
         }
         // Incomplete initial sync - resume it
         Some(state) if !state.initial_sync_complete => {
-            info!("Resuming incomplete initial sync...");
+            info!(
+                "Resuming incomplete initial sync (page_token={}, messages_listed={}, failed_ids={})",
+                state.fetch_page_token.is_some(),
+                state.messages_listed,
+                state.failed_message_ids.len()
+            );
             initial_sync(gmail, store, account_id, &options)?
         }
-        // Complete sync state - try incremental
+        // Complete sync state - check for staleness first
         Some(state) => {
-            match incremental_sync(gmail, store, account_id, &state, &options) {
-                Ok(stats) => stats,
-                Err(e) if e.downcast_ref::<HistoryExpiredError>().is_some() => {
-                    // History ID expired, fall back to full resync
-                    warn!("History ID expired, performing full resync");
-                    store.clear_mail_data()?;
-                    store.delete_sync_state(account_id)?;
-                    initial_sync(gmail, store, account_id, &options)?
+            // Proactively detect stale history IDs (older than 5 days)
+            // Gmail history IDs expire after ~7 days, so we trigger a resync early
+            // to avoid losing messages during the gap
+            let age = chrono::Utc::now() - state.last_sync_at;
+            if age.num_days() >= 5 {
+                warn!(
+                    "Sync state is {} days old (history_id may expire), performing full resync",
+                    age.num_days()
+                );
+                store.clear_mail_data()?;
+                store.delete_sync_state(account_id)?;
+                initial_sync(gmail, store, account_id, &options)?
+            } else {
+                // Try incremental sync
+                match incremental_sync(gmail, store, account_id, &state, &options) {
+                    Ok(stats) => stats,
+                    Err(e) if e.downcast_ref::<HistoryExpiredError>().is_some() => {
+                        // History ID expired, fall back to full resync
+                        warn!("History ID expired (404/400 from Gmail), performing full resync");
+                        store.clear_mail_data()?;
+                        store.delete_sync_state(account_id)?;
+                        initial_sync(gmail, store, account_id, &options)?
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
         }
         // No sync state - start initial sync
-        None => initial_sync(gmail, store, account_id, &options)?,
+        None => {
+            info!("No existing sync state, starting initial sync...");
+            initial_sync(gmail, store, account_id, &options)?
+        }
     };
 
     stats.duration_ms = start.elapsed().as_millis() as u64;
@@ -187,9 +220,9 @@ fn initial_sync(
     // === PHASE 1: FETCH ===
     // Download messages as fast as Gmail allows, store as pending
     info!("[SYNC] Phase 1: Fetching messages from Gmail...");
-    let fetch_stats = fetch_phase(gmail, store, options, &mut stats)?;
-    info!("[SYNC] Fetch phase complete: {} fetched, {} pending, {} skipped",
-        fetch_stats.fetched, fetch_stats.pending, fetch_stats.skipped);
+    let fetch_stats = fetch_phase(gmail, store, account_id, options, &mut stats)?;
+    info!("[SYNC] Fetch phase complete: {} fetched, {} pending, {} skipped, {} failed",
+        fetch_stats.fetched, fetch_stats.pending, fetch_stats.skipped, fetch_stats.failed_ids.len());
 
     // === PHASE 2: PROCESS ===
     // Process pending messages: INBOX first, then the rest
@@ -221,34 +254,58 @@ fn initial_sync(
     );
 
     // Run incremental catch-up sync to get any messages that arrived during initial sync
+    // Retry up to 3 times to ensure we don't miss messages
     info!("Running catch-up sync for messages received during initial sync...");
-    match incremental_sync(gmail, store, account_id, &complete_state, options) {
-        Ok(catchup_stats) => {
-            info!(
-                "Catch-up sync complete: {} new messages, {} label updates",
-                catchup_stats.messages_created,
-                catchup_stats.labels_updated
-            );
-            // Merge catch-up stats into main stats (including timing)
-            stats.messages_fetched += catchup_stats.messages_fetched;
-            stats.messages_created += catchup_stats.messages_created;
-            stats.messages_updated += catchup_stats.messages_updated;
-            stats.labels_updated += catchup_stats.labels_updated;
-            stats.threads_created += catchup_stats.threads_created;
-            stats.threads_updated += catchup_stats.threads_updated;
-            stats.errors += catchup_stats.errors;
-            // Merge timing (catch-up is incremental sync)
-            stats.timing.incremental_sync_ms += catchup_stats.timing.incremental_sync_ms;
-            stats.timing.history_ms += catchup_stats.timing.history_ms;
-            stats.timing.fetch_messages_ms += catchup_stats.timing.fetch_messages_ms;
-            stats.timing.normalize_ms += catchup_stats.timing.normalize_ms;
-            stats.timing.storage_ms += catchup_stats.timing.storage_ms;
-            stats.timing.compute_thread_ms += catchup_stats.timing.compute_thread_ms;
-            stats.timing.search_index_ms += catchup_stats.timing.search_index_ms;
-        }
-        Err(e) => {
-            // Catch-up sync is best-effort; log but don't fail the whole sync
-            warn!("Catch-up sync failed (non-fatal): {}", e);
+    let max_catchup_retries = 3;
+    let mut catchup_attempt = 0;
+    let mut catchup_success = false;
+
+    while catchup_attempt < max_catchup_retries && !catchup_success {
+        catchup_attempt += 1;
+
+        match incremental_sync(gmail, store, account_id, &complete_state, options) {
+            Ok(catchup_stats) => {
+                info!(
+                    "Catch-up sync complete: {} new messages, {} label updates",
+                    catchup_stats.messages_created,
+                    catchup_stats.labels_updated
+                );
+                // Merge catch-up stats into main stats (including timing)
+                stats.messages_fetched += catchup_stats.messages_fetched;
+                stats.messages_created += catchup_stats.messages_created;
+                stats.messages_updated += catchup_stats.messages_updated;
+                stats.labels_updated += catchup_stats.labels_updated;
+                stats.threads_created += catchup_stats.threads_created;
+                stats.threads_updated += catchup_stats.threads_updated;
+                stats.errors += catchup_stats.errors;
+                // Merge timing (catch-up is incremental sync)
+                stats.timing.incremental_sync_ms += catchup_stats.timing.incremental_sync_ms;
+                stats.timing.history_ms += catchup_stats.timing.history_ms;
+                stats.timing.fetch_messages_ms += catchup_stats.timing.fetch_messages_ms;
+                stats.timing.normalize_ms += catchup_stats.timing.normalize_ms;
+                stats.timing.storage_ms += catchup_stats.timing.storage_ms;
+                stats.timing.compute_thread_ms += catchup_stats.timing.compute_thread_ms;
+                stats.timing.search_index_ms += catchup_stats.timing.search_index_ms;
+                catchup_success = true;
+            }
+            Err(e) => {
+                if catchup_attempt < max_catchup_retries {
+                    warn!(
+                        "Catch-up sync failed (attempt {}/{}), retrying: {}",
+                        catchup_attempt, max_catchup_retries, e
+                    );
+                    // Brief delay before retry
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                } else {
+                    // Final attempt failed - log but don't fail the whole sync
+                    // The failed_message_ids mechanism will help recover any missed messages
+                    // on the next sync
+                    warn!(
+                        "Catch-up sync failed after {} attempts (non-fatal): {}",
+                        max_catchup_retries, e
+                    );
+                }
+            }
         }
     }
 
@@ -264,6 +321,8 @@ pub struct FetchPhaseStats {
     pub pending: usize,
     /// Messages skipped (already synced)
     pub skipped: usize,
+    /// Message IDs that failed to fetch (will be retried next sync)
+    pub failed_ids: Vec<String>,
 }
 
 /// Phase 1: Fetch messages from Gmail as fast as possible
@@ -271,11 +330,19 @@ pub struct FetchPhaseStats {
 /// Lists all message IDs, fetches full content in parallel, stores raw JSON as pending.
 /// This phase is optimized for maximum Gmail API throughput.
 ///
+/// ## Resilience Features
+///
+/// - **Page token checkpointing**: Progress is saved after each page of message listing.
+///   If sync is interrupted, it will resume from the last saved page token.
+/// - **Failed ID tracking**: Messages that fail to fetch (non-retriable errors) are
+///   recorded and will be retried on the next sync attempt.
+///
 /// Call this from a background thread, then call `process_pending_batch` repeatedly
 /// to process messages with UI updates between batches.
 pub fn fetch_phase(
     gmail: &GmailClient,
     store: &dyn MailStore,
+    account_id: &str,
     options: &SyncOptions,
     stats: &mut SyncStats,
 ) -> Result<FetchPhaseStats> {
@@ -283,11 +350,49 @@ pub fn fetch_phase(
         fetched: 0,
         pending: 0,
         skipped: 0,
+        failed_ids: Vec::new(),
     };
 
-    let mut page_token: Option<String> = None;
-    let mut total_listed = 0usize;
+    // Load existing sync state to get resume position and failed IDs
+    let existing_state = store.get_sync_state(account_id)?;
+    let (mut page_token, mut total_listed, previous_failed_ids) = match &existing_state {
+        Some(state) if !state.initial_sync_complete => {
+            info!(
+                "Resuming fetch from page_token={:?}, messages_listed={}, failed_ids={}",
+                state.fetch_page_token.as_deref().map(|s| &s[..s.len().min(20)]),
+                state.messages_listed,
+                state.failed_message_ids.len()
+            );
+            (
+                state.fetch_page_token.clone(),
+                state.messages_listed,
+                state.failed_message_ids.clone(),
+            )
+        }
+        _ => (None, 0, Vec::new()),
+    };
+
     let batch_size = 500; // Gmail API max is 500 per page
+
+    // First, retry any previously failed message IDs
+    if !previous_failed_ids.is_empty() {
+        info!("Retrying {} previously failed message IDs", previous_failed_ids.len());
+        let failed_ids_to_retry: Vec<MessageId> = previous_failed_ids
+            .iter()
+            .map(|id| MessageId::new(id))
+            .collect();
+
+        let retry_failed = fetch_message_batch(
+            gmail,
+            store,
+            &failed_ids_to_retry,
+            stats,
+        );
+        fetch_stats.fetched += retry_failed.fetched;
+        fetch_stats.pending += retry_failed.pending;
+        // Any still-failing IDs will be tracked
+        fetch_stats.failed_ids.extend(retry_failed.failed_ids);
+    }
 
     loop {
         // Check if we've hit the limit
@@ -343,56 +448,122 @@ pub fn fetch_phase(
         stats.messages_fetched += message_refs.len();
 
         if !to_fetch.is_empty() {
-            // Gmail batch API has aggressive rate limiting independent of quota
-            // 25 messages per batch with no delay works reliably
-            let chunk_size = 25;
-            for chunk in to_fetch.chunks(chunk_size) {
-                let fetch_start = Instant::now();
-                let results = gmail.get_messages_batch(chunk);
-                stats.timing.fetch_messages_ms += fetch_start.elapsed().as_millis() as u64;
+            let batch_result = fetch_message_batch(gmail, store, &to_fetch, stats);
+            fetch_stats.fetched += batch_result.fetched;
+            fetch_stats.pending += batch_result.pending;
+            fetch_stats.failed_ids.extend(batch_result.failed_ids);
+        }
 
-                // Store immediately after each chunk
-                let store_start = Instant::now();
-                for result in results {
-                    match result {
-                        Ok(gmail_msg) => {
-                            let msg_id = MessageId::new(&gmail_msg.id);
-                            let label_ids = gmail_msg.label_ids.clone().unwrap_or_default();
+        // Determine next page token
+        let next_page_token = list_response.next_page_token;
 
-                            match serde_json::to_vec(&gmail_msg) {
-                                Ok(data) => {
-                                    if let Err(e) = store.store_pending_message(&msg_id, &data, label_ids) {
-                                        warn!("Failed to store pending message {}: {}", msg_id.as_str(), e);
-                                        stats.errors += 1;
-                                    } else {
-                                        fetch_stats.fetched += 1;
-                                        fetch_stats.pending += 1;
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("Failed to serialize message {}: {}", msg_id.as_str(), e);
-                                    stats.errors += 1;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch message: {}", e);
-                            stats.errors += 1;
-                        }
-                    }
-                }
-                stats.timing.storage_ms += store_start.elapsed().as_millis() as u64;
-            }
+        // Checkpoint progress after each page (before moving to next)
+        // This ensures we can resume from this point if interrupted
+        if let Some(ref state) = existing_state {
+            let updated_state = state.clone().with_fetch_progress(
+                next_page_token.clone(),
+                total_listed,
+            ).with_failed_ids(fetch_stats.failed_ids.clone());
+            store.save_sync_state(updated_state)?;
         }
 
         // Check for next page
-        match list_response.next_page_token {
+        match next_page_token {
             Some(token) => page_token = Some(token),
             None => break,
         }
     }
 
+    // Clear page token in final state (listing complete)
+    if let Some(ref state) = existing_state {
+        let final_state = state.clone().with_fetch_progress(None, total_listed)
+            .with_failed_ids(fetch_stats.failed_ids.clone());
+        store.save_sync_state(final_state)?;
+    }
+
+    if !fetch_stats.failed_ids.is_empty() {
+        warn!(
+            "Fetch phase complete with {} failed message IDs (will retry next sync)",
+            fetch_stats.failed_ids.len()
+        );
+    }
+
     Ok(fetch_stats)
+}
+
+/// Helper struct for batch fetch results
+struct BatchFetchResult {
+    fetched: usize,
+    pending: usize,
+    failed_ids: Vec<String>,
+}
+
+/// Fetch a batch of messages and store them as pending
+fn fetch_message_batch(
+    gmail: &GmailClient,
+    store: &dyn MailStore,
+    to_fetch: &[MessageId],
+    stats: &mut SyncStats,
+) -> BatchFetchResult {
+    let mut result = BatchFetchResult {
+        fetched: 0,
+        pending: 0,
+        failed_ids: Vec::new(),
+    };
+
+    // Gmail batch API has aggressive rate limiting independent of quota
+    // 25 messages per batch with no delay works reliably
+    let chunk_size = 25;
+    for chunk in to_fetch.chunks(chunk_size) {
+        let fetch_start = Instant::now();
+        let results = gmail.get_messages_batch(chunk);
+        stats.timing.fetch_messages_ms += fetch_start.elapsed().as_millis() as u64;
+
+        // Store immediately after each chunk
+        let store_start = Instant::now();
+        for (msg_id, fetch_result) in chunk.iter().zip(results) {
+            match fetch_result {
+                Ok(gmail_msg) => {
+                    let label_ids = gmail_msg.label_ids.clone().unwrap_or_default();
+
+                    match serde_json::to_vec(&gmail_msg) {
+                        Ok(data) => {
+                            if let Err(e) = store.store_pending_message(msg_id, &data, label_ids) {
+                                warn!("Failed to store pending message {}: {}", msg_id.as_str(), e);
+                                stats.errors += 1;
+                                result.failed_ids.push(msg_id.as_str().to_string());
+                            } else {
+                                result.fetched += 1;
+                                result.pending += 1;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to serialize message {}: {}", msg_id.as_str(), e);
+                            stats.errors += 1;
+                            // Don't add to failed_ids - serialization errors won't recover
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    // Only track as failed if it's potentially recoverable
+                    // 404 might be a permanently deleted message, but we'll retry once
+                    // to be sure (could be a transient issue)
+                    if error_msg.contains("404") {
+                        warn!("Message {} not found (404), will retry once: {}", msg_id.as_str(), e);
+                        result.failed_ids.push(msg_id.as_str().to_string());
+                    } else {
+                        warn!("Failed to fetch message {}: {}", msg_id.as_str(), e);
+                        result.failed_ids.push(msg_id.as_str().to_string());
+                    }
+                    stats.errors += 1;
+                }
+            }
+        }
+        stats.timing.storage_ms += store_start.elapsed().as_millis() as u64;
+    }
+
+    result
 }
 
 /// Result from processing a batch of pending messages

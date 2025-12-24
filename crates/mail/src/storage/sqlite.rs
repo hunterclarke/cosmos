@@ -115,6 +115,15 @@ fn migrations() -> Migrations<'static> {
             CREATE INDEX idx_pending_labels ON pending_message_labels(label_id);
             "#,
         ),
+        // Migration 2: Add sync resilience fields
+        M::up(
+            r#"
+            -- Add fetch progress checkpointing fields to sync_state
+            ALTER TABLE sync_state ADD COLUMN fetch_page_token TEXT;
+            ALTER TABLE sync_state ADD COLUMN messages_listed INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sync_state ADD COLUMN failed_message_ids TEXT NOT NULL DEFAULT '[]';
+            "#,
+        ),
     ])
 }
 
@@ -793,9 +802,10 @@ impl MailStore for SqliteMailStore {
     fn get_sync_state(&self, account_id: &str) -> Result<Option<SyncState>> {
         let conn = self.conn.lock().unwrap();
 
-        let row: Option<(String, String, String, u32, bool)> = conn
+        let row: Option<(String, String, String, u32, bool, Option<String>, i64, String)> = conn
             .query_row(
-                "SELECT account_id, history_id, last_sync_at, sync_version, initial_sync_complete
+                "SELECT account_id, history_id, last_sync_at, sync_version, initial_sync_complete,
+                        fetch_page_token, messages_listed, failed_message_ids
                  FROM sync_state WHERE account_id = ?",
                 [account_id],
                 |row| {
@@ -805,13 +815,24 @@ impl MailStore for SqliteMailStore {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((account_id, history_id, last_sync_at_str, sync_version, initial_sync_complete)) =
-            row
+        let Some((
+            account_id,
+            history_id,
+            last_sync_at_str,
+            sync_version,
+            initial_sync_complete,
+            fetch_page_token,
+            messages_listed,
+            failed_message_ids_json,
+        )) = row
         else {
             return Ok(None);
         };
@@ -820,28 +841,42 @@ impl MailStore for SqliteMailStore {
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
 
+        // Parse failed_message_ids from JSON
+        let failed_message_ids: Vec<String> =
+            serde_json::from_str(&failed_message_ids_json).unwrap_or_default();
+
         Ok(Some(SyncState {
             account_id,
             history_id,
             last_sync_at,
             sync_version,
             initial_sync_complete,
+            fetch_page_token,
+            messages_listed: messages_listed as usize,
+            failed_message_ids,
         }))
     }
 
     fn save_sync_state(&self, state: SyncState) -> Result<()> {
         let conn = self.conn.lock().unwrap();
 
+        // Serialize failed_message_ids to JSON
+        let failed_message_ids_json = serde_json::to_string(&state.failed_message_ids)?;
+
         conn.execute(
             "INSERT OR REPLACE INTO sync_state
-             (account_id, history_id, last_sync_at, sync_version, initial_sync_complete)
-             VALUES (?, ?, ?, ?, ?)",
+             (account_id, history_id, last_sync_at, sync_version, initial_sync_complete,
+              fetch_page_token, messages_listed, failed_message_ids)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 state.account_id,
                 state.history_id,
                 state.last_sync_at.to_rfc3339(),
                 state.sync_version,
                 state.initial_sync_complete,
+                state.fetch_page_token,
+                state.messages_listed as i64,
+                failed_message_ids_json,
             ],
         )?;
 

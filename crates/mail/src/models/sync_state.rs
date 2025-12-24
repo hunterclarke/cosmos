@@ -7,6 +7,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// Persisted separately from messages to enable incremental sync.
 /// Only one SyncState per Gmail account.
+///
+/// ## Resilience Design
+///
+/// The sync state is designed to survive crashes, restarts, and interruptions:
+///
+/// - `initial_sync_complete`: Distinguishes between "never synced" vs "partial sync"
+/// - `fetch_page_token`: Allows resuming message listing from where we left off
+/// - `failed_message_ids`: Tracks messages that failed to fetch for later retry
+/// - `messages_listed`: Count of message IDs discovered (for progress tracking)
+///
+/// After any interruption, `sync_gmail` will:
+/// 1. Resume listing from `fetch_page_token` (if set)
+/// 2. Retry fetching `failed_message_ids`
+/// 3. Process any pending messages from previous fetch
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncState {
     /// Gmail user or account identifier
@@ -20,6 +34,16 @@ pub struct SyncState {
     /// Whether initial sync has completed (false = still in progress)
     #[serde(default = "default_true")]
     pub initial_sync_complete: bool,
+    /// Page token to resume message listing (None = start from beginning or listing complete)
+    #[serde(default)]
+    pub fetch_page_token: Option<String>,
+    /// Message IDs that failed to fetch (non-retriable errors like 404)
+    /// These will be retried on next sync attempt
+    #[serde(default)]
+    pub failed_message_ids: Vec<String>,
+    /// Count of message IDs listed so far (for progress tracking)
+    #[serde(default)]
+    pub messages_listed: usize,
 }
 
 fn default_true() -> bool {
@@ -35,6 +59,9 @@ impl SyncState {
             last_sync_at: Utc::now(),
             sync_version: 1,
             initial_sync_complete: true,
+            fetch_page_token: None,
+            failed_message_ids: Vec::new(),
+            messages_listed: 0,
         }
     }
 
@@ -50,15 +77,22 @@ impl SyncState {
             last_sync_at: Utc::now(),
             sync_version: 1,
             initial_sync_complete: false,
+            fetch_page_token: None,
+            failed_message_ids: Vec::new(),
+            messages_listed: 0,
         }
     }
 
     /// Mark initial sync as complete
     ///
     /// Uses the history_id already stored in the partial state.
+    /// Clears fetch progress fields since listing is complete.
     pub fn mark_complete(mut self) -> Self {
         self.last_sync_at = Utc::now();
         self.initial_sync_complete = true;
+        self.fetch_page_token = None;
+        self.failed_message_ids.clear();
+        self.messages_listed = 0;
         self
     }
 
@@ -69,11 +103,41 @@ impl SyncState {
         self
     }
 
+    /// Update fetch progress (call after each page of message listing)
+    ///
+    /// Persisting this allows resuming listing from where we left off after a crash.
+    pub fn with_fetch_progress(
+        mut self,
+        page_token: Option<String>,
+        messages_listed: usize,
+    ) -> Self {
+        self.fetch_page_token = page_token;
+        self.messages_listed = messages_listed;
+        self.last_sync_at = Utc::now();
+        self
+    }
+
+    /// Add failed message IDs for later retry
+    pub fn with_failed_ids(mut self, failed_ids: Vec<String>) -> Self {
+        self.failed_message_ids = failed_ids;
+        self
+    }
+
     /// Check if this state is recent enough to be useful
     /// Gmail history IDs typically expire after about a week
     pub fn is_recent(&self) -> bool {
         let age = Utc::now() - self.last_sync_at;
         age.num_days() < 7
+    }
+
+    /// Check if there are failed message IDs that need retry
+    pub fn has_failed_messages(&self) -> bool {
+        !self.failed_message_ids.is_empty()
+    }
+
+    /// Check if there's a page token to resume from
+    pub fn has_fetch_progress(&self) -> bool {
+        self.fetch_page_token.is_some()
     }
 }
 

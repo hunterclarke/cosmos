@@ -167,11 +167,12 @@ impl OrionApp {
                         start.elapsed()
                     );
 
-                    let last_sync_at = store
-                        .get_sync_state("default")
-                        .ok()
-                        .flatten()
-                        .map(|state| state.last_sync_at);
+                    let sync_state = store.get_sync_state("default").ok().flatten();
+                    let last_sync_at = sync_state.as_ref().map(|state| state.last_sync_at);
+                    let needs_resume = sync_state
+                        .as_ref()
+                        .map(|state| !state.initial_sync_complete)
+                        .unwrap_or(false);
 
                     let search_index = match Self::create_search_index() {
                         Ok(index) => {
@@ -187,12 +188,12 @@ impl OrionApp {
                         }
                     };
 
-                    Ok((store, last_sync_at, search_index))
+                    Ok((store, last_sync_at, needs_resume, search_index))
                 })
                 .await;
 
             // Update app state on main thread
-            if let Ok((store, last_sync_at, search_index)) = result {
+            if let Ok((store, last_sync_at, needs_resume, search_index)) = result {
                 cx.update(|cx| {
                     this.update(cx, |app, cx| {
                         app.store = store.clone();
@@ -217,11 +218,17 @@ impl OrionApp {
 
                         info!("Persistent storage loaded");
 
-                        // Auto-start sync if Gmail is configured but we haven't synced yet
-                        // This triggers the OAuth flow if not authenticated, then syncs
-                        if app.gmail_client.is_some() && app.last_sync_at.is_none() {
-                            info!("No previous sync found, starting initial sync...");
-                            app.sync(cx);
+                        // Auto-start sync if:
+                        // 1. Gmail is configured but we haven't synced yet (first time)
+                        // 2. Or there's an incomplete initial sync that needs to be resumed
+                        if app.gmail_client.is_some() {
+                            if needs_resume {
+                                info!("Incomplete initial sync detected, resuming...");
+                                app.sync(cx);
+                            } else if app.last_sync_at.is_none() {
+                                info!("No previous sync found, starting initial sync...");
+                                app.sync(cx);
+                            }
                         }
 
                         cx.notify();
@@ -835,16 +842,34 @@ impl OrionApp {
             // Save partial sync state immediately with history_id
             // This ensures incremental sync works even if app crashes during sync
             // Must be after clear (which deletes sync_state) but before fetch starts
-            if let Some(ref history_id) = history_id {
-                let partial_state = SyncState::partial("default", history_id);
-                if let Err(e) = store.save_sync_state(partial_state) {
-                    warn!("[SYNC] Failed to save partial sync state: {}", e);
-                } else {
-                    info!(
-                        "[SYNC] Saved partial sync state with history_id: {}",
-                        history_id
-                    );
+            //
+            // IMPORTANT: Only save a NEW partial state if we don't already have one.
+            // If we're resuming an incomplete sync, the existing state has the page_token
+            // and failed_message_ids that we need to resume from.
+            let existing_sync_state = store.get_sync_state("default").ok().flatten();
+            let is_resuming = existing_sync_state
+                .as_ref()
+                .map(|s| !s.initial_sync_complete)
+                .unwrap_or(false);
+
+            if !is_resuming {
+                if let Some(ref history_id) = history_id {
+                    let partial_state = SyncState::partial("default", history_id);
+                    if let Err(e) = store.save_sync_state(partial_state) {
+                        warn!("[SYNC] Failed to save partial sync state: {}", e);
+                    } else {
+                        info!(
+                            "[SYNC] Saved partial sync state with history_id: {}",
+                            history_id
+                        );
+                    }
                 }
+            } else {
+                info!(
+                    "[SYNC] Resuming existing sync (page_token={}, failed_ids={})",
+                    existing_sync_state.as_ref().map(|s| s.fetch_page_token.is_some()).unwrap_or(false),
+                    existing_sync_state.as_ref().map(|s| s.failed_message_ids.len()).unwrap_or(0)
+                );
             }
 
             // Track when fetch phase is done
@@ -865,6 +890,7 @@ impl OrionApp {
                     match fetch_phase(
                         &client_clone,
                         store_for_fetch.as_ref(),
+                        "default",
                         &options_clone,
                         &mut fetch_stats,
                     ) {
