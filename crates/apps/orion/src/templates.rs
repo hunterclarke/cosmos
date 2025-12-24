@@ -92,17 +92,17 @@ html, body {{
 /// Generate CSS styles for message cards
 fn message_styles(colors: &ThemeColors) -> String {
     format!(
-        r#".message {{
+        r#".orion-message {{
     background: {card_bg};
     border: 1px solid {border};
     border-radius: 8px;
     margin-bottom: 12px;
     overflow: hidden;
 }}
-.message-inner {{
+.orion-message-inner {{
     padding: 16px;
 }}
-.header {{
+.orion-header {{
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
@@ -110,26 +110,26 @@ fn message_styles(colors: &ThemeColors) -> String {
     padding-bottom: 12px;
     border-bottom: 1px solid {border};
 }}
-.sender {{ font-weight: 600; color: {fg}; }}
-.email {{ font-size: 12px; color: {muted}; margin-top: 2px; }}
-.date {{ font-size: 12px; color: {muted}; }}
-.recipients {{ font-size: 12px; color: {muted}; margin-bottom: 12px; }}
-.body {{
+.orion-sender {{ font-weight: 600; color: {fg}; }}
+.orion-email {{ font-size: 12px; color: {muted}; margin-top: 2px; }}
+.orion-date {{ font-size: 12px; color: {muted}; }}
+.orion-recipients {{ font-size: 12px; color: {muted}; margin-bottom: 12px; }}
+.orion-body {{
     color: {fg};
     overflow: hidden;
     border-radius: 0 0 6px 6px;
 }}
-.body img {{ max-width: 100%; height: auto; }}
-.body a {{ color: {link}; }}
-.body > * {{ border-radius: inherit; overflow: hidden; }}
-.body blockquote {{
+.orion-body img {{ max-width: 100%; height: auto; }}
+.orion-body a {{ color: {link}; }}
+.orion-body > * {{ border-radius: inherit; overflow: hidden; }}
+.orion-body blockquote {{
     border-left: 3px solid {border};
     padding-left: 12px;
     margin: 8px 0;
     color: {muted};
 }}
 /* Plain text body styling - matches header padding with reduced font size */
-.body-text {{
+.orion-body-text {{
     padding: 16px;
     font-size: 13px;
     line-height: 1.6;
@@ -145,7 +145,7 @@ fn message_styles(colors: &ThemeColors) -> String {
 /// Generate CSS styles for error display
 fn error_styles(colors: &ThemeColors) -> String {
     format!(
-        r#".error {{
+        r#".orion-error {{
     background: {danger_bg};
     color: {danger_fg};
     padding: 16px;
@@ -204,17 +204,21 @@ fn render_message(message: &Message) -> String {
     };
 
     // Use different class for plain text vs HTML bodies
-    let body_class = if has_html { "body" } else { "body body-text" };
+    let body_class = if has_html {
+        "orion-body"
+    } else {
+        "orion-body orion-body-text"
+    };
 
     let mut html = format!(
-        r#"<div class="message">
-<div class="message-inner">
-<div class="header">
+        r#"<div class="orion-message">
+<div class="orion-message-inner">
+<div class="orion-header">
 <div>
-<div class="sender">{}</div>
-<div class="email">{}</div>
+<div class="orion-sender">{}</div>
+<div class="orion-email">{}</div>
 </div>
-<div class="date">{}</div>
+<div class="orion-date">{}</div>
 </div>
 "#,
         html_escape(&sender_name),
@@ -224,7 +228,7 @@ fn render_message(message: &Message) -> String {
 
     if !recipients_str.is_empty() {
         html.push_str(&format!(
-            r#"<div class="recipients">To: {}</div>
+            r#"<div class="orion-recipients">To: {}</div>
 "#,
             html_escape(&recipients_str)
         ));
@@ -288,7 +292,7 @@ pub fn error_html(message: &str, theme: &Theme) -> String {
 </style>
 </head>
 <body>
-<div class="error">{}</div>
+<div class="orion-error">{}</div>
 </body>
 </html>"#,
         base_styles(&colors),

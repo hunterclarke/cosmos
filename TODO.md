@@ -17,5 +17,8 @@
 - [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)
 - [ ] Sync improvements
   - [x] Try and minimize the rate limiting on initial sync
-  - [ ] Sync should be resilient to sleep/restart/etc
-- [ ] Sandbox thread html css
+  - [x] Sync should be resilient to sleep/restart/etc
+- [x] Sandbox thread html css
+- [ ] Keep mailbox up to date
+  - [ ] Polling
+  - [ ] Push?
