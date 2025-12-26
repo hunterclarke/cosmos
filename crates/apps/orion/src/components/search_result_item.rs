@@ -1,4 +1,5 @@
 //! Search result item component - displays a single search result
+//! Uses Gmail-style single-line layout: Sender | Subject - preview | Date
 
 use gpui::prelude::*;
 use gpui::*;
@@ -113,7 +114,7 @@ impl RenderOnce for SearchResultItem {
         let snippet = self.result.snippet.clone();
 
         // Text styling based on unread status
-        let subject_weight = if is_unread {
+        let text_weight = if is_unread {
             FontWeight::SEMIBOLD
         } else {
             FontWeight::NORMAL
@@ -121,105 +122,110 @@ impl RenderOnce for SearchResultItem {
 
         // Render highlighted text elements
         let subject_styled = self.render_highlighted_text(&subject);
-        let snippet_styled = self.render_highlighted_text(&snippet);
+        let snippet_text = if snippet.is_empty() {
+            String::new()
+        } else {
+            format!("- {}", snippet)
+        };
+        let snippet_styled = self.render_highlighted_text(&snippet_text);
 
         div()
-            .size_full()
+            .w_full()
+            .h_full()
             .bg(bg_color)
-            .border_t_1()
+            .border_b_1()
             .border_color(theme.border)
             .cursor_pointer()
             .hover(|style| style.bg(theme.list_hover))
-            .overflow_hidden()
             .child(
-                        // Inner content with horizontal padding
+                // Single row layout
+                div()
+                    .px_3()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    // Unread indicator dot
+                    .child(
                         div()
-                            .px_3()
-                            .py_2()
-                            .flex()
-                            .items_start()
-                            .gap_2()
-                            // Unread indicator dot
-                            .child(
-                                div()
-                                    .pt(px(5.)) // Align with first line of text
-                                    .child(
-                                        div()
-                                            .w(px(6.))
-                                            .h(px(6.))
-                                            .rounded_full()
-                                            .when(is_unread, |el| el.bg(theme.primary))
-                                            .flex_shrink_0(),
-                                    ),
-                            )
-                            // Content: sender, subject, snippet
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_px()
-                                    .overflow_hidden()
-                                    .min_w_0()
-                                    .flex_1()
-                                    // Sender
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(subject_weight)
-                                            .text_color(theme.foreground)
-                                            .text_ellipsis()
-                                            .child(sender_display),
-                                    )
-                                    // Subject with highlighting
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(subject_weight)
-                                            .text_color(theme.foreground)
-                                            .text_ellipsis()
-                                            .child(subject_styled),
-                                    )
-                                    // Snippet with highlighting
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .text_ellipsis()
-                                            .child(snippet_styled),
-                                    ),
-                            )
-                            // Date and message count
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_end()
-                                    .gap_1()
-                                    .flex_shrink_0()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if is_unread {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .font_weight(if is_unread {
-                                                FontWeight::MEDIUM
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
-                                            .child(date_str),
-                                    )
-                                    .when(message_count > 1, |el| {
-                                        el.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(format!("({})", message_count)),
-                                        )
-                                    }),
-                            ),
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .when(is_unread, |el| el.bg(theme.primary)),
                     )
+                    // Column 1: Sender with message count
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(text_weight)
+                                    .text_color(theme.foreground)
+                                    .text_ellipsis()
+                                    .child(sender_display),
+                            )
+                            .when(message_count > 1, |el| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .flex_shrink_0()
+                                        .child(format!("({})", message_count)),
+                                )
+                            }),
+                    )
+                    // Column 2: Subject - preview with highlighting (fills remaining space)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(text_weight)
+                                    .text_color(theme.foreground)
+                                    .flex_shrink_0()
+                                    .child(subject_styled),
+                            )
+                            .when(!snippet.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .ml_1()
+                                        .text_ellipsis()
+                                        .child(snippet_styled),
+                                )
+                            }),
+                    )
+                    // Column 3: Date (right-aligned)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(if is_unread {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .font_weight(if is_unread {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .child(date_str),
+                    ),
+            )
     }
 }

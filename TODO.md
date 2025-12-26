@@ -24,3 +24,6 @@
 - [ ] Onboarding
   - [ ] Login experience
   - [ ] Sync explanation
+- [ ] OS default keyboard shortcuts (quit, minimize, maximize, etc.)
+- [ ] Unread count badge on nav
+- [ ] Use total/unread counts on list headers (instead of just the in-memory counts)

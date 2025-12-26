@@ -14,8 +14,8 @@ use crate::app::OrionApp;
 use crate::components::ThreadListItem;
 use crate::input::{Archive, MoveDown, MoveUp, OpenSelected, ToggleRead, ToggleStar, Trash};
 
-/// Height of each thread list item (2 lines: subject, snippet + padding)
-const THREAD_ITEM_HEIGHT: f32 = 56.0;
+/// Height of each thread list item (single line Gmail-style)
+const THREAD_ITEM_HEIGHT: f32 = 40.0;
 
 /// Thread list view showing threads filtered by label
 pub struct ThreadListView {

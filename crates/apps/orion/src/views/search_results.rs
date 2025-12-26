@@ -15,8 +15,8 @@ use std::sync::Arc;
 use crate::app::OrionApp;
 use crate::components::SearchResultItem;
 
-/// Height of each search result item (matches thread list item styling with 3 lines)
-const RESULT_ITEM_HEIGHT: f32 = 86.0;
+/// Height of each search result item (single line Gmail-style)
+const RESULT_ITEM_HEIGHT: f32 = 40.0;
 
 /// View for displaying search results
 pub struct SearchResultsView {
