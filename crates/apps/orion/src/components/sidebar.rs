@@ -116,13 +116,8 @@ impl RenderOnce for SidebarItem {
             .when(unread_count > 0, |el| {
                 el.child(
                     div()
-                        .px_2()
-                        .py_px()
-                        .rounded_md()
-                        .bg(theme.primary)
                         .text_xs()
-                        .text_color(theme.primary_foreground)
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
                         .child(format!("{}", unread_count)),
                 )
             })

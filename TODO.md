@@ -25,6 +25,8 @@
   - [ ] Login experience
   - [ ] Sync explanation
 - [ ] OS default keyboard shortcuts (quit, minimize, maximize, etc.)
-- [ ] Unread count badge on nav
-- [ ] Use total/unread counts on list headers (instead of just the in-memory counts)
+- [x] Unread count badge on nav
+- [x] Use total/unread counts on list headers (instead of just the in-memory counts)
 - [ ] Improve plain text email rendering (horizontal padding)
+- [ ] List view paging
+- [ ] Only half my main mailbox was synced

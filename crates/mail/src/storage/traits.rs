@@ -197,6 +197,12 @@ pub trait MailStore: Send + Sync {
     /// Count total threads
     fn count_threads(&self) -> Result<usize>;
 
+    /// Count threads with a specific label
+    fn count_threads_by_label(&self, label: &str) -> Result<usize>;
+
+    /// Count unread threads with a specific label
+    fn count_unread_threads_by_label(&self, label: &str) -> Result<usize>;
+
     /// Count messages in a thread
     fn count_messages_in_thread(&self, thread_id: &ThreadId) -> Result<usize>;
 

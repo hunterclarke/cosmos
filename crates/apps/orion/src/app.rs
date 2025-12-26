@@ -226,6 +226,9 @@ impl OrionApp {
                             });
                         }
 
+                        // Update inbox unread count
+                        app.refresh_inbox_unread_count();
+
                         info!("Persistent storage loaded");
 
                         // Auto-start sync if:
@@ -489,6 +492,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Update inbox unread count
+                            app.refresh_inbox_unread_count();
                             // Trigger sync to pick up any new messages
                             app.try_sync(cx);
                         }
@@ -589,6 +594,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Update inbox unread count
+                            app.refresh_inbox_unread_count();
                             // Trigger sync to pick up any new messages
                             app.try_sync(cx);
                         }
@@ -646,6 +653,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Update inbox unread count
+                            app.refresh_inbox_unread_count();
                             // Trigger sync to pick up any new messages
                             app.try_sync(cx);
                         }
@@ -766,6 +775,22 @@ impl OrionApp {
                 .ok();
             })
             .detach();
+        }
+    }
+
+    /// Refresh the unread count for the Inbox label from storage
+    fn refresh_inbox_unread_count(&mut self) {
+        let unread_count = self
+            .store
+            .count_unread_threads_by_label(LabelId::INBOX)
+            .unwrap_or(0) as u32;
+
+        // Update the Inbox label's unread count
+        for label in &mut self.labels {
+            if label.id.as_str() == LabelId::INBOX {
+                label.unread_count = unread_count;
+                break;
+            }
         }
     }
 
@@ -1035,6 +1060,9 @@ impl OrionApp {
                                         thread_list.update(cx, |view, cx| view.load_threads(cx));
                                     }
 
+                                    // Update inbox unread count
+                                    app.refresh_inbox_unread_count();
+
                                     // Start background polling if not already running
                                     if app.poll_task.is_none() && app.gmail_client.is_some() {
                                         app.start_polling(cx);
@@ -1285,6 +1313,9 @@ impl OrionApp {
                     if let Some(thread_list) = &app.thread_list_view {
                         thread_list.update(cx, |view, cx| view.load_threads(cx));
                     }
+
+                    // Update inbox unread count
+                    app.refresh_inbox_unread_count();
 
                     // Start background polling if not already running
                     // (handles case where first sync was triggered manually after OAuth)

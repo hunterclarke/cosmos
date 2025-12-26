@@ -36,6 +36,10 @@ pub struct ThreadListView {
     label_filter: Option<String>,
     /// Focus handle for keyboard input
     focus_handle: FocusHandle,
+    /// Total count of threads for current label (from storage, not in-memory)
+    total_count: usize,
+    /// Unread count of threads for current label (from storage, not in-memory)
+    unread_count: usize,
 }
 
 impl ThreadListView {
@@ -53,6 +57,8 @@ impl ThreadListView {
             item_sizes: Rc::new(Vec::new()),
             label_filter: Some("INBOX".to_string()),
             focus_handle: cx.focus_handle(),
+            total_count: 0,
+            unread_count: 0,
         }
     }
 
@@ -246,7 +252,8 @@ impl ThreadListView {
 
         // Use storage-layer filtering for efficiency
         // "ALL" means all mail - no filtering
-        let result = match self.label_filter.as_deref() {
+        let label = self.label_filter.as_deref();
+        let result = match label {
             None | Some("ALL") => {
                 debug!("Loading all threads (no filter)");
                 list_threads(self.store.as_ref(), 500, 0)
@@ -257,9 +264,27 @@ impl ThreadListView {
             }
         };
 
+        // Fetch actual counts from storage
+        let (total, unread) = match label {
+            None | Some("ALL") => {
+                let total = self.store.count_threads().unwrap_or(0);
+                let unread = self
+                    .store
+                    .list_threads(10000, 0)
+                    .map(|threads| threads.iter().filter(|t| t.is_unread).count())
+                    .unwrap_or(0);
+                (total, unread)
+            }
+            Some(label) => {
+                let total = self.store.count_threads_by_label(label).unwrap_or(0);
+                let unread = self.store.count_unread_threads_by_label(label).unwrap_or(0);
+                (total, unread)
+            }
+        };
+
         match result {
             Ok(threads) => {
-                debug!("Loaded {} threads", threads.len());
+                debug!("Loaded {} threads (total: {}, unread: {})", threads.len(), total, unread);
 
                 // Update item sizes for virtual list
                 self.item_sizes = Rc::new(
@@ -269,6 +294,8 @@ impl ThreadListView {
                         .collect(),
                 );
                 self.threads = threads;
+                self.total_count = total;
+                self.unread_count = unread;
                 self.is_loading = false;
 
                 // Clamp selection to valid bounds after reload
@@ -312,14 +339,11 @@ impl ThreadListView {
         let theme = cx.theme();
         let label_name = self.current_label_name().to_string();
 
-        // Count total threads and unread threads
-        let total_count = self.threads.len();
-        let unread_count = self.threads.iter().filter(|t| t.is_unread).count();
-
-        let stats_text = if unread_count > 0 {
-            format!("{} messages, {} unread", total_count, unread_count)
+        // Use actual counts from storage (not in-memory counts)
+        let stats_text = if self.unread_count > 0 {
+            format!("{} messages, {} unread", self.total_count, self.unread_count)
         } else {
-            format!("{} messages", total_count)
+            format!("{} messages", self.total_count)
         };
 
         div()

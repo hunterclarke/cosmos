@@ -768,6 +768,32 @@ impl MailStore for SqliteMailStore {
         Ok(count as usize)
     }
 
+    fn count_threads_by_label(&self, label: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM thread_labels WHERE label_id = ?",
+            [label],
+            |row| row.get(0),
+        )?;
+
+        Ok(count as usize)
+    }
+
+    fn count_unread_threads_by_label(&self, label: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM thread_labels tl
+             INNER JOIN threads t ON tl.thread_id = t.id
+             WHERE tl.label_id = ? AND t.is_unread = 1",
+            [label],
+            |row| row.get(0),
+        )?;
+
+        Ok(count as usize)
+    }
+
     fn count_messages_in_thread(&self, thread_id: &ThreadId) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
 

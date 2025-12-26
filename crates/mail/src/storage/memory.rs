@@ -247,6 +247,32 @@ impl MailStore for InMemoryMailStore {
         Ok(threads.len())
     }
 
+    fn count_threads_by_label(&self, label: &str) -> Result<usize> {
+        let index = self.label_thread_index.read().unwrap();
+        Ok(index.get(label).map(|set| set.len()).unwrap_or(0))
+    }
+
+    fn count_unread_threads_by_label(&self, label: &str) -> Result<usize> {
+        let index = self.label_thread_index.read().unwrap();
+        let threads = self.threads.read().unwrap();
+
+        let Some(label_set) = index.get(label) else {
+            return Ok(0);
+        };
+
+        let count = label_set
+            .iter()
+            .filter(|(_, thread_id)| {
+                threads
+                    .get(thread_id)
+                    .map(|t| t.is_unread)
+                    .unwrap_or(false)
+            })
+            .count();
+
+        Ok(count)
+    }
+
     fn count_messages_in_thread(&self, thread_id: &ThreadId) -> Result<usize> {
         let thread_messages = self.thread_messages.read().unwrap();
         Ok(thread_messages
