@@ -447,11 +447,22 @@ impl OrionApp {
         }
     }
 
-    /// Archive the current thread
+    /// Archive the current thread (navigates back to inbox after)
     pub fn archive_current_thread(&mut self, cx: &mut Context<Self>) {
         let Some(thread_id) = self.current_thread_id().cloned() else {
             return;
         };
+        self.archive_thread(thread_id, true, cx);
+    }
+
+    /// Archive a specific thread
+    /// If `navigate_to_inbox` is true, navigates back to inbox after archiving
+    pub fn archive_thread(
+        &mut self,
+        thread_id: ThreadId,
+        navigate_to_inbox: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(action_handler) = self.action_handler.clone() else {
             warn!("Cannot archive: action handler not available");
             return;
@@ -470,8 +481,10 @@ impl OrionApp {
                     match result {
                         Ok(()) => {
                             info!("Thread archived successfully");
-                            // Go back to inbox after archiving
-                            app.show_inbox(cx);
+                            // Only navigate to inbox if requested (e.g., from thread view)
+                            if navigate_to_inbox {
+                                app.show_inbox(cx);
+                            }
                             // Refresh thread list
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
@@ -496,6 +509,11 @@ impl OrionApp {
         let Some(thread_id) = self.current_thread_id().cloned() else {
             return;
         };
+        self.toggle_star_thread(thread_id, cx);
+    }
+
+    /// Toggle star on a specific thread
+    pub fn toggle_star_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         let Some(action_handler) = self.action_handler.clone() else {
             warn!("Cannot toggle star: action handler not available");
             return;
@@ -514,11 +532,8 @@ impl OrionApp {
                     match result {
                         Ok(new_starred) => {
                             info!(
-                                "Thread {} {}",
-                                if new_starred { "starred" } else { "unstarred" },
-                                app.current_thread_id()
-                                    .map(|id| id.as_str())
-                                    .unwrap_or("unknown")
+                                "Thread {}",
+                                if new_starred { "starred" } else { "unstarred" }
                             );
                             // Refresh thread list to show updated star state
                             if let Some(thread_list) = &app.thread_list_view {
@@ -544,6 +559,11 @@ impl OrionApp {
         let Some(thread_id) = self.current_thread_id().cloned() else {
             return;
         };
+        self.toggle_read_thread(thread_id, cx);
+    }
+
+    /// Toggle read status on a specific thread
+    pub fn toggle_read_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         let Some(action_handler) = self.action_handler.clone() else {
             warn!("Cannot toggle read: action handler not available");
             return;
@@ -584,11 +604,22 @@ impl OrionApp {
         .detach();
     }
 
-    /// Trash the current thread
+    /// Trash the current thread (navigates back to inbox after)
     pub fn trash_current_thread(&mut self, cx: &mut Context<Self>) {
         let Some(thread_id) = self.current_thread_id().cloned() else {
             return;
         };
+        self.trash_thread(thread_id, true, cx);
+    }
+
+    /// Trash a specific thread
+    /// If `navigate_to_inbox` is true, navigates back to inbox after trashing
+    pub fn trash_thread(
+        &mut self,
+        thread_id: ThreadId,
+        navigate_to_inbox: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(action_handler) = self.action_handler.clone() else {
             warn!("Cannot trash: action handler not available");
             return;
@@ -607,8 +638,10 @@ impl OrionApp {
                     match result {
                         Ok(()) => {
                             info!("Thread trashed successfully");
-                            // Go back to inbox after trashing
-                            app.show_inbox(cx);
+                            // Only navigate to inbox if requested (e.g., from thread view)
+                            if navigate_to_inbox {
+                                app.show_inbox(cx);
+                            }
                             // Refresh thread list
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));

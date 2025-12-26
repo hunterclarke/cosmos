@@ -110,65 +110,52 @@ impl ThreadListView {
         }
     }
 
-    /// Archive the selected thread
+    /// Archive the selected thread (stays in list view)
     fn archive_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(app) = &self.app {
-            if let Some(index) = self.selected_index {
-                if let Some(thread) = self.threads.get(index) {
-                    let thread_id = thread.id.clone();
-                    app.update(cx, |app, cx| {
-                        // Navigate to thread first so archive_current_thread works
-                        app.show_thread(thread_id, cx);
-                        app.archive_current_thread(cx);
-                    });
-                }
-            }
-        }
+        let Some(app) = &self.app else { return };
+        let Some(index) = self.selected_index else { return };
+        let Some(thread) = self.threads.get(index) else { return };
+
+        let thread_id = thread.id.clone();
+        app.update(cx, |app, cx| {
+            app.archive_thread(thread_id, false, cx);
+        });
     }
 
-    /// Toggle star on selected thread
+    /// Toggle star on selected thread (stays in list view)
     fn toggle_star_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(app) = &self.app {
-            if let Some(index) = self.selected_index {
-                if let Some(thread) = self.threads.get(index) {
-                    let thread_id = thread.id.clone();
-                    app.update(cx, |app, cx| {
-                        app.show_thread(thread_id, cx);
-                        app.toggle_star_current_thread(cx);
-                    });
-                }
-            }
-        }
+        let Some(app) = &self.app else { return };
+        let Some(index) = self.selected_index else { return };
+        let Some(thread) = self.threads.get(index) else { return };
+
+        let thread_id = thread.id.clone();
+        app.update(cx, |app, cx| {
+            app.toggle_star_thread(thread_id, cx);
+        });
     }
 
-    /// Toggle read status on selected thread
+    /// Toggle read status on selected thread (stays in list view)
     fn toggle_read_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(app) = &self.app {
-            if let Some(index) = self.selected_index {
-                if let Some(thread) = self.threads.get(index) {
-                    let thread_id = thread.id.clone();
-                    app.update(cx, |app, cx| {
-                        app.show_thread(thread_id, cx);
-                        app.toggle_read_current_thread(cx);
-                    });
-                }
-            }
-        }
+        let Some(app) = &self.app else { return };
+        let Some(index) = self.selected_index else { return };
+        let Some(thread) = self.threads.get(index) else { return };
+
+        let thread_id = thread.id.clone();
+        app.update(cx, |app, cx| {
+            app.toggle_read_thread(thread_id, cx);
+        });
     }
 
-    /// Trash the selected thread
+    /// Trash the selected thread (stays in list view)
     fn trash_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(app) = &self.app {
-            if let Some(index) = self.selected_index {
-                if let Some(thread) = self.threads.get(index) {
-                    let thread_id = thread.id.clone();
-                    app.update(cx, |app, cx| {
-                        app.show_thread(thread_id, cx);
-                        app.trash_current_thread(cx);
-                    });
-                }
-            }
-        }
+        let Some(app) = &self.app else { return };
+        let Some(index) = self.selected_index else { return };
+        let Some(thread) = self.threads.get(index) else { return };
+
+        let thread_id = thread.id.clone();
+        app.update(cx, |app, cx| {
+            app.trash_thread(thread_id, false, cx);
+        });
     }
 
     // Action handlers
@@ -246,7 +233,7 @@ impl ThreadListView {
         }
     }
 
-    pub fn load_threads(&mut self, _cx: &mut Context<Self>) {
+    pub fn load_threads(&mut self, cx: &mut Context<Self>) {
         self.is_loading = true;
         self.error_message = None;
 
@@ -276,6 +263,25 @@ impl ThreadListView {
                 );
                 self.threads = threads;
                 self.is_loading = false;
+
+                // Clamp selection to valid bounds after reload
+                // This ensures selection stays valid after archive/trash removes a thread
+                if let Some(index) = self.selected_index {
+                    if self.threads.is_empty() {
+                        self.selected_index = None;
+                        self.selected_thread = None;
+                    } else if index >= self.threads.len() {
+                        // Selection was past end, move to last item
+                        let new_index = self.threads.len() - 1;
+                        self.selected_index = Some(new_index);
+                        self.selected_thread = Some(self.threads[new_index].id.clone());
+                    } else {
+                        // Keep same index, update thread id (thread at this index may have changed)
+                        self.selected_thread = Some(self.threads[index].id.clone());
+                    }
+                }
+
+                cx.notify();
             }
             Err(e) => {
                 error!("Failed to load threads: {}", e);
