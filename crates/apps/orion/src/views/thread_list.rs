@@ -5,6 +5,7 @@ use gpui::*;
 use gpui_component::scroll::Scrollbar;
 use gpui_component::skeleton::Skeleton;
 use gpui_component::{ActiveTheme, VirtualListScrollHandle, v_virtual_list};
+use gpui::ScrollStrategy;
 use log::{debug, error};
 use mail::{MailStore, ThreadId, ThreadSummary, list_threads, list_threads_by_label};
 use std::rc::Rc;
@@ -75,6 +76,9 @@ impl ThreadListView {
         };
         self.selected_index = Some(new_index);
         self.selected_thread = Some(self.threads[new_index].id.clone());
+        // Scroll to keep selected item visible
+        self.scroll_handle
+            .scroll_to_item(new_index, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -93,6 +97,9 @@ impl ThreadListView {
         };
         self.selected_index = Some(new_index);
         self.selected_thread = Some(self.threads[new_index].id.clone());
+        // Scroll to keep selected item visible
+        self.scroll_handle
+            .scroll_to_item(new_index, ScrollStrategy::Top);
         cx.notify();
     }
 

@@ -13,7 +13,7 @@
 - [ ] Attachments + blob storage
 - [ ] Compose email
 - [ ] Reply to email
-- [ ] Scroll on keyboard up/down nav
+- [x] Scroll on keyboard up/down nav
 - [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)
 - [x] Sync improvements
   - [x] Try and minimize the rate limiting on initial sync
@@ -27,3 +27,4 @@
 - [ ] OS default keyboard shortcuts (quit, minimize, maximize, etc.)
 - [ ] Unread count badge on nav
 - [ ] Use total/unread counts on list headers (instead of just the in-memory counts)
+- [ ] Improve plain text email rendering (horizontal padding)
