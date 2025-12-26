@@ -294,7 +294,7 @@ pub fn sync_gmail(
                 initial_sync(gmail, store, account_id, &options)?
             } else {
                 // Try incremental sync
-                match incremental_sync(gmail, store, account_id, &state, &options) {
+                match incremental_sync(gmail, store, &state, &options) {
                     Ok(stats) => stats,
                     Err(e) if e.downcast_ref::<HistoryExpiredError>().is_some() => {
                         // History ID expired, fall back to full resync
@@ -405,7 +405,7 @@ fn initial_sync(
     while catchup_attempt < max_catchup_retries && !catchup_success {
         catchup_attempt += 1;
 
-        match incremental_sync(gmail, store, account_id, &complete_state, options) {
+        match incremental_sync(gmail, store, &complete_state, options) {
             Ok(catchup_stats) => {
                 info!(
                     "Catch-up sync complete: {} new messages, {} label updates",
@@ -931,11 +931,22 @@ fn get_current_history_id(gmail: &GmailClient) -> Result<String> {
     Ok(profile.history_id)
 }
 
-/// Perform incremental sync using History API
-fn incremental_sync(
+/// Perform incremental sync using Gmail History API
+///
+/// Fetches changes since the last sync using the history_id from the sync state.
+/// This is much faster than a full sync as it only fetches changed messages.
+///
+/// # Arguments
+/// * `gmail` - Gmail client
+/// * `store` - Mail store
+/// * `state` - Current sync state (must have history_id)
+/// * `options` - Sync options (for search indexing)
+///
+/// # Returns
+/// Sync statistics or error (including HistoryExpiredError if history_id is too old)
+pub fn incremental_sync(
     gmail: &GmailClient,
     store: &dyn MailStore,
-    _account_id: &str,
     state: &SyncState,
     options: &SyncOptions,
 ) -> Result<SyncStats> {

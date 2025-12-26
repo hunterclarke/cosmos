@@ -95,6 +95,14 @@ pub struct OrionApp {
     thread_list_context: ListContext,
     /// Profile email address (fetched from Gmail)
     profile_email: Option<String>,
+    /// Minimum seconds between syncs (cooldown)
+    sync_cooldown_secs: u64,
+    /// Background polling interval in seconds
+    poll_interval_secs: u64,
+    /// Background polling task handle
+    poll_task: Option<Task<()>>,
+    /// Track window active state for foreground detection
+    was_window_active: bool,
 }
 
 impl OrionApp {
@@ -137,6 +145,10 @@ impl OrionApp {
             pending_g_sequence: false,
             thread_list_context: ListContext::Inbox,
             profile_email: None,
+            sync_cooldown_secs: 30,
+            poll_interval_secs: 60,
+            poll_task: None,
+            was_window_active: true,
         }
     }
 
@@ -235,6 +247,11 @@ impl OrionApp {
                                 info!("No previous sync found, starting initial sync...");
                             }
                             app.sync(cx);
+                        }
+
+                        // Start background polling if Gmail is configured
+                        if app.gmail_client.is_some() {
+                            app.start_polling(cx);
                         }
 
                         cx.notify();
@@ -459,6 +476,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Trigger sync to pick up any new messages
+                            app.try_sync(cx);
                         }
                         Err(e) => {
                             error!("Failed to archive thread: {}", e);
@@ -505,6 +524,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Trigger sync to pick up any new messages
+                            app.try_sync(cx);
                         }
                         Err(e) => {
                             error!("Failed to toggle star: {}", e);
@@ -548,6 +569,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Trigger sync to pick up any new messages
+                            app.try_sync(cx);
                         }
                         Err(e) => {
                             error!("Failed to toggle read status: {}", e);
@@ -590,6 +613,8 @@ impl OrionApp {
                             if let Some(thread_list) = &app.thread_list_view {
                                 thread_list.update(cx, |view, cx| view.load_threads(cx));
                             }
+                            // Trigger sync to pick up any new messages
+                            app.try_sync(cx);
                         }
                         Err(e) => {
                             error!("Failed to trash thread: {}", e);
@@ -726,7 +751,78 @@ impl OrionApp {
         }
         // Focus thread list on next render
         self.pending_focus = Some(PendingFocus::ThreadList);
+
+        // Trigger sync when navigating to a different label
+        self.try_sync(cx);
+
         cx.notify();
+    }
+
+    /// Check if enough time has passed since last sync to allow a new sync.
+    ///
+    /// Returns false if:
+    /// - Already syncing
+    /// - Gmail client not configured
+    /// - Last sync was less than `sync_cooldown_secs` ago
+    fn should_sync(&self) -> bool {
+        if self.is_syncing || self.gmail_client.is_none() {
+            return false;
+        }
+        mail::cooldown_elapsed(self.last_sync_at, self.sync_cooldown_secs)
+    }
+
+    /// Try to sync if cooldown has elapsed.
+    ///
+    /// This is the preferred way to trigger syncs from activity handlers
+    /// (label navigation, actions completing, window focus, etc).
+    fn try_sync(&mut self, cx: &mut Context<Self>) {
+        if self.should_sync() {
+            debug!("try_sync: cooldown elapsed, starting sync");
+            self.sync(cx);
+        } else {
+            debug!("try_sync: skipping sync (cooldown not elapsed or already syncing)");
+        }
+    }
+
+    /// Start background polling for new mail.
+    ///
+    /// Runs a loop that syncs every `poll_interval_secs` seconds.
+    /// Polling stops if Gmail client is removed or app is dropped.
+    fn start_polling(&mut self, cx: &mut Context<Self>) {
+        use std::time::Duration;
+
+        // Cancel existing poll task if any
+        self.poll_task = None;
+
+        let interval = Duration::from_secs(self.poll_interval_secs);
+        info!(
+            "Starting background sync polling (interval: {}s)",
+            self.poll_interval_secs
+        );
+
+        self.poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                // Wait for the polling interval
+                cx.background_executor().timer(interval).await;
+
+                // Try to sync
+                let should_continue = cx
+                    .update(|cx| {
+                        this.update(cx, |app, cx| {
+                            app.try_sync(cx);
+                            // Continue polling only if gmail is configured
+                            app.gmail_client.is_some()
+                        })
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    info!("Stopping background sync polling (gmail client removed)");
+                    break;
+                }
+            }
+        }));
     }
 
     /// Trigger inbox sync with event-driven UI updates
@@ -855,6 +951,102 @@ impl OrionApp {
             let existing_sync_state = store.get_sync_state("default").ok().flatten();
             let sync_info = mail::get_sync_state_info(existing_sync_state.as_ref());
 
+            // Determine what sync action to take
+            let sync_action = mail::determine_sync_action(existing_sync_state.as_ref(), false);
+            debug!("[SYNC] Sync action: {:?}", sync_action);
+
+            // Check if we should do an incremental sync (fast path using History API)
+            if let mail::SyncAction::IncrementalSync { history_id: _ } = &sync_action {
+                if let Some(ref state) = existing_sync_state {
+                    info!("[SYNC] Performing incremental sync using History API");
+
+                    let store_for_sync = store.clone();
+                    let client_for_sync = client.clone();
+                    let options_for_sync = options.clone();
+                    let state_clone = state.clone();
+
+                    let sync_result = background
+                        .spawn(async move {
+                            mail::incremental_sync(
+                                &client_for_sync,
+                                store_for_sync.as_ref(),
+                                &state_clone,
+                                &options_for_sync,
+                            )
+                        })
+                        .await;
+
+                    match sync_result {
+                        Ok(stats) => {
+                            info!(
+                                "[SYNC] Incremental sync complete: {} created, {} updated",
+                                stats.messages_created, stats.messages_updated
+                            );
+
+                            // Update the sync state with new history_id
+                            if let Some(ref new_history_id) = history_id {
+                                let updated_state = SyncState::new("default", new_history_id);
+                                if let Err(e) = store.save_sync_state(updated_state) {
+                                    warn!("[SYNC] Failed to update sync state: {}", e);
+                                }
+                            }
+
+                            // Update UI
+                            cx.update(|cx| {
+                                this.update(cx, |app, cx| {
+                                    app.is_syncing = false;
+                                    app.last_sync_at = Some(Utc::now());
+
+                                    // Reload thread list
+                                    if let Some(thread_list) = &app.thread_list_view {
+                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                    }
+
+                                    // Start background polling if not already running
+                                    if app.poll_task.is_none() && app.gmail_client.is_some() {
+                                        app.start_polling(cx);
+                                    }
+
+                                    cx.notify();
+                                })
+                            })
+                            .ok();
+                            return;
+                        }
+                        Err(e) => {
+                            // Check if it's a history expired error - need full resync
+                            if e.downcast_ref::<mail::HistoryExpiredError>().is_some() {
+                                warn!("[SYNC] History ID expired, falling back to full sync");
+                                // Clear data and continue with full sync below
+                                if let Err(clear_err) = store.clear() {
+                                    error!("[SYNC] Failed to clear store: {}", clear_err);
+                                }
+                                if let Some(ref index) = search_index {
+                                    if let Err(clear_err) = index.clear() {
+                                        error!("[SYNC] Failed to clear search index: {}", clear_err);
+                                    }
+                                }
+                                // Delete sync state to trigger fresh initial sync
+                                let _ = store.delete_sync_state("default");
+                            } else {
+                                // Other error - report and stop
+                                error!("[SYNC] Incremental sync failed: {}", e);
+                                cx.update(|cx| {
+                                    this.update(cx, |app, cx| {
+                                        app.sync_error = Some(format!("Sync failed: {}", e));
+                                        app.is_syncing = false;
+                                        cx.notify();
+                                    })
+                                })
+                                .ok();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Full sync path: Initial sync or resume incomplete sync
             if !sync_info.needs_resume {
                 if let Some(ref history_id) = history_id {
                     let partial_state = SyncState::partial("default", history_id);
@@ -1060,6 +1252,13 @@ impl OrionApp {
                     if let Some(thread_list) = &app.thread_list_view {
                         thread_list.update(cx, |view, cx| view.load_threads(cx));
                     }
+
+                    // Start background polling if not already running
+                    // (handles case where first sync was triggered manually after OAuth)
+                    if app.poll_task.is_none() && app.gmail_client.is_some() {
+                        app.start_polling(cx);
+                    }
+
                     cx.notify();
                 })
             })
@@ -1463,6 +1662,14 @@ impl OrionApp {
 
 impl Render for OrionApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Sync when window becomes active (foreground)
+        let is_active = window.is_window_active();
+        if is_active && !self.was_window_active {
+            debug!("Window became active, triggering sync");
+            self.try_sync(cx);
+        }
+        self.was_window_active = is_active;
+
         // Handle pending focus on search results (from Enter key in search box)
         if self.pending_focus_results {
             self.pending_focus_results = false;

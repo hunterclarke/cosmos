@@ -15,10 +15,12 @@
 - [ ] Reply to email
 - [ ] Scroll on keyboard up/down nav
 - [ ] Go to star and toggle start keyboard shortcuts conflict (as with any other shared non-modifier keys)
-- [ ] Sync improvements
+- [x] Sync improvements
   - [x] Try and minimize the rate limiting on initial sync
   - [x] Sync should be resilient to sleep/restart/etc
 - [x] Sandbox thread html css
-- [ ] Keep mailbox up to date
-  - [ ] Polling
-  - [ ] Push?
+- [x] Keep mailbox up to date
+- [ ] Integration with OS notifications
+- [ ] Onboarding
+  - [ ] Login experience
+  - [ ] Sync explanation
