@@ -29,5 +29,5 @@
 - [x] Use total/unread counts on list headers (instead of just the in-memory counts)
 - [ ] Improve plain text email rendering (horizontal padding)
 - [ ] List view paging
-- [ ] Only half my main mailbox was synced
-- [ ] Sync is causing too many renders. Debounce.
+- [x] Only half my main mailbox was synced
+- [x] Sync is causing too many renders. Debounce.

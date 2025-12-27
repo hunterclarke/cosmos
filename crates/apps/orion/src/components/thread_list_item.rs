@@ -103,51 +103,33 @@ impl RenderOnce for ThreadListItem {
                             .flex_shrink_0()
                             .when(is_unread, |el| el.bg(theme.primary)),
                     )
-                    // Column 1: Sender with message count (and account in unified view)
-                    .child({
-                        let account_email = self.account_email.clone();
+                    // Column 1: Sender with message count
+                    .child(
                         div()
                             .w(px(180.))
                             .flex_shrink_0()
                             .flex()
-                            .flex_col()
-                            .justify_center()
+                            .items_center()
+                            .gap_1()
                             .overflow_hidden()
-                            // Main row: sender + message count
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(text_weight)
-                                            .text_color(theme.foreground)
-                                            .text_ellipsis()
-                                            .child(sender_display),
-                                    )
-                                    .when(message_count > 1, |el| {
-                                        el.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .flex_shrink_0()
-                                                .child(format!("({})", message_count)),
-                                        )
-                                    }),
+                                    .text_sm()
+                                    .font_weight(text_weight)
+                                    .text_color(theme.foreground)
+                                    .text_ellipsis()
+                                    .child(sender_display),
                             )
-                            // Secondary row: account email (unified view only)
-                            .when_some(account_email, |el, email| {
+                            .when(message_count > 1, |el| {
                                 el.child(
                                     div()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .text_ellipsis()
-                                        .child(email),
+                                        .flex_shrink_0()
+                                        .child(format!("({})", message_count)),
                                 )
-                            })
-                    })
+                            }),
+                    )
                     // Column 2: Subject - preview (fills remaining space)
                     .child(
                         div()
@@ -176,7 +158,20 @@ impl RenderOnce for ThreadListItem {
                                 )
                             }),
                     )
-                    // Column 3: Date (right-aligned)
+                    // Column 3: Account email (unified view only)
+                    .when_some(self.account_email, |el, email| {
+                        el.child(
+                            div()
+                                .w(px(140.))
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .child(email),
+                        )
+                    })
+                    // Column 4: Date (right-aligned)
                     .child(
                         div()
                             .flex_shrink_0()

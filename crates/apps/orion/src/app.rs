@@ -1389,6 +1389,9 @@ impl OrionApp {
             // Process phase
             let batch_size = 50;
             let mut consecutive_empty = 0;
+            // Debounce UI updates to avoid choppy re-renders during sync
+            let mut last_ui_update = std::time::Instant::now();
+            let ui_debounce_interval = std::time::Duration::from_millis(300);
 
             loop {
                 // Check for fetch errors
@@ -1432,19 +1435,23 @@ impl OrionApp {
 
                         if processed > 0 {
                             consecutive_empty = 0;
-                            cx.update(|cx| {
-                                this.update(cx, |app, cx| {
-                                    if let Some(thread_list) = &app.thread_list_view {
-                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
-                                    }
-                                    debug!(
-                                        "[SYNC] Account {} processed {} messages, {} remaining",
-                                        account_id, processed, remaining
-                                    );
-                                    cx.notify();
+                            // Only update UI if debounce interval has passed
+                            if last_ui_update.elapsed() >= ui_debounce_interval {
+                                last_ui_update = std::time::Instant::now();
+                                cx.update(|cx| {
+                                    this.update(cx, |app, cx| {
+                                        if let Some(thread_list) = &app.thread_list_view {
+                                            thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                        }
+                                        debug!(
+                                            "[SYNC] Account {} processed {} messages, {} remaining",
+                                            account_id, processed, remaining
+                                        );
+                                        cx.notify();
+                                    })
                                 })
-                            })
-                            .ok();
+                                .ok();
+                            }
                         } else {
                             consecutive_empty += 1;
                         }
@@ -1493,8 +1500,18 @@ impl OrionApp {
             }
 
             // Mark sync complete
+            // IMPORTANT: Load existing state to preserve failed_message_ids from fetch_phase
             if let Some(ref history_id) = history_id {
-                let complete_state = SyncState::new(account_id, history_id);
+                let existing_state = store.get_sync_state(account_id).ok().flatten();
+                let complete_state = match existing_state {
+                    Some(state) => {
+                        // Preserve failed_message_ids for retry on next sync
+                        let mut complete = SyncState::new(account_id, history_id);
+                        complete.failed_message_ids = state.failed_message_ids;
+                        complete
+                    }
+                    None => SyncState::new(account_id, history_id),
+                };
                 if let Err(e) = store.save_sync_state(complete_state) {
                     error!("[SYNC] Account {} failed to mark sync complete: {}", account_id, e);
                 } else {
@@ -1815,6 +1832,9 @@ impl OrionApp {
             let batch_size = 100;
             let mut stats = SyncStats::default();
             let mut consecutive_empty = 0;
+            // Debounce UI updates to avoid choppy re-renders during sync
+            let mut last_ui_update = std::time::Instant::now();
+            let ui_debounce_interval = std::time::Duration::from_millis(300);
 
             loop {
                 // Check for fetch errors
@@ -1856,20 +1876,23 @@ impl OrionApp {
 
                         if processed > 0 {
                             consecutive_empty = 0;
-                            // Update UI with new data
-                            cx.update(|cx| {
-                                this.update(cx, |app, cx| {
-                                    if let Some(thread_list) = &app.thread_list_view {
-                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
-                                    }
-                                    debug!(
-                                        "[SYNC] Processed {} messages, {} remaining",
-                                        processed, remaining
-                                    );
-                                    cx.notify();
+                            // Only update UI if debounce interval has passed
+                            if last_ui_update.elapsed() >= ui_debounce_interval {
+                                last_ui_update = std::time::Instant::now();
+                                cx.update(|cx| {
+                                    this.update(cx, |app, cx| {
+                                        if let Some(thread_list) = &app.thread_list_view {
+                                            thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                        }
+                                        debug!(
+                                            "[SYNC] Processed {} messages, {} remaining",
+                                            processed, remaining
+                                        );
+                                        cx.notify();
+                                    })
                                 })
-                            })
-                            .ok();
+                                .ok();
+                            }
                         } else {
                             consecutive_empty += 1;
                         }
@@ -1930,8 +1953,18 @@ impl OrionApp {
 
             // Mark sync state as complete
             // This updates the partial state saved at the start to indicate sync finished
+            // IMPORTANT: Load existing state to preserve failed_message_ids from fetch_phase
             if let Some(ref history_id) = history_id {
-                let complete_state = SyncState::new(account_id, history_id);
+                let existing_state = store.get_sync_state(account_id).ok().flatten();
+                let complete_state = match existing_state {
+                    Some(state) => {
+                        // Preserve failed_message_ids for retry on next sync
+                        let mut complete = SyncState::new(account_id, history_id);
+                        complete.failed_message_ids = state.failed_message_ids;
+                        complete
+                    }
+                    None => SyncState::new(account_id, history_id),
+                };
                 if let Err(e) = store.save_sync_state(complete_state) {
                     error!("[SYNC] Failed to mark sync complete: {}", e);
                 } else {

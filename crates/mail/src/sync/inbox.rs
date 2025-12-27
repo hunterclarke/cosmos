@@ -380,8 +380,18 @@ fn initial_sync(
     }
 
     // Mark initial sync as complete with the history_id we captured at the start
-    let partial_state = SyncState::partial(account_id, &start_history_id);
-    let complete_state = partial_state.mark_complete();
+    // IMPORTANT: Load the existing state to preserve failed_message_ids from fetch_phase
+    let existing_state = store.get_sync_state(account_id)?;
+    let complete_state = match existing_state {
+        Some(state) => {
+            // Preserve failed_message_ids for retry on next sync
+            let failed_ids = state.failed_message_ids.clone();
+            let mut complete = SyncState::partial(account_id, &start_history_id).mark_complete();
+            complete.failed_message_ids = failed_ids;
+            complete
+        }
+        None => SyncState::partial(account_id, &start_history_id).mark_complete(),
+    };
     store.save_sync_state(complete_state.clone())?;
 
     // Record total initial sync time
