@@ -124,8 +124,13 @@ cosmos/
 │   │   └── src/ffi/        # UniFFI facade module
 │   └── mail-ffi/           # Thin crate for XCFramework generation
 ├── docs/                   # Documentation
-├── script/                 # Build scripts
-│   └── build-xcframework   # XCFramework builder for Apple platforms
+├── script/                 # Build and run scripts
+│   ├── build-xcframework   # XCFramework builder for Apple platforms
+│   ├── build-gpui-release  # Production GPUI build with embedded credentials
+│   ├── setup-credentials   # Configure OAuth for both apps
+│   ├── run-gpui            # Run GPUI Orion (debug/release)
+│   ├── run-macos           # Open SwiftUI project for macOS
+│   └── run-ios             # Open SwiftUI project for iOS
 └── cosmos-stubs/           # Temporary stubs for cosmos-* crates
 ```
 
@@ -318,6 +323,7 @@ apple/Orion/Sources/
 │   ├── ThreadDetailView.swift
 │   └── SearchResultsView.swift
 ├── Components/
+│   ├── MessageWebView.swift  # WKWebView wrapper for HTML email rendering
 │   ├── SearchBox.swift
 │   └── ShortcutsHelpView.swift
 ├── Services/
