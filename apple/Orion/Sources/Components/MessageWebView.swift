@@ -6,37 +6,50 @@ import WebKit
 struct MessageWebView {
     let html: String
 
-    /// Wraps raw HTML content with dark theme CSS styling
-    /// iOS uses a fixed viewport width to ensure emails render at readable size
-    private func wrapHtml(_ content: String, for platform: Platform) -> String {
-        let fontSize = platform == .iOS ? "16px" : "14px"
-        let padding = platform == .iOS ? "16px" : "0"
+    #if os(iOS)
+    @Binding var contentHeight: CGFloat
 
-        // iOS: Use a fixed viewport width (typical email width) so content renders at readable size
-        // The WKWebView will scale this to fit the screen
-        // macOS: Use device width
-        let viewport = platform == .iOS
-            ? "width=600, initial-scale=1.0, user-scalable=yes"
-            : "width=device-width, initial-scale=1.0"
+    init(html: String, contentHeight: Binding<CGFloat>) {
+        self.html = html
+        self._contentHeight = contentHeight
+    }
+    #else
+    init(html: String) {
+        self.html = html
+    }
+    #endif
+
+    /// Wraps raw HTML content with dark theme CSS styling
+    private func wrapHtml(_ content: String, for platform: Platform) -> String {
+        let fontSize = platform == .iOS ? "17px" : "14px"
+        let padding = platform == .iOS ? "12px" : "0"
+
+        // iOS: Don't constrain viewport - let content render at natural size
+        // User can scroll horizontally for wide emails or pinch to zoom
+        // macOS: Use device width for responsive rendering
+        let viewportMeta = platform == .iOS
+            ? ""  // No viewport meta - let WKWebView handle it naturally
+            : "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
 
         return """
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="\(viewport)">
+            \(viewportMeta)
             <style>
-                * {
-                    box-sizing: border-box;
-                }
+                /* Base styles for the wrapper - namespaced to avoid conflicts */
                 html, body {
                     margin: 0;
                     padding: 0;
                     width: 100%;
                     min-height: 100%;
-                }
-                body {
                     background-color: #1e1e1e;
+                    -webkit-text-size-adjust: 100%;
+                }
+
+                /* Orion mail wrapper - all our styles are scoped here */
+                .orion-mail-content {
                     color: #e0e0e0;
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                     font-size: \(fontSize);
@@ -44,51 +57,15 @@ struct MessageWebView {
                     padding: \(padding);
                     word-wrap: break-word;
                     overflow-wrap: break-word;
-                    -webkit-text-size-adjust: 100%;
-                }
-                a {
-                    color: #58a6ff;
-                    text-decoration: none;
-                }
-                a:hover {
-                    text-decoration: underline;
-                }
-                blockquote {
-                    border-left: 3px solid #444;
-                    padding-left: 12px;
-                    margin: 12px 0;
-                    color: #999;
-                }
-                img {
-                    max-width: 100%;
-                    height: auto;
-                }
-                pre, code {
-                    background-color: #2d2d2d;
-                    padding: 4px;
-                    border-radius: 4px;
                     overflow-x: auto;
-                    font-family: 'SF Mono', Monaco, Consolas, monospace;
-                    font-size: 13px;
                 }
-                pre {
-                    padding: 12px;
-                    margin: 8px 0;
+
+                /* Default link color if email doesn't specify */
+                .orion-mail-content a {
+                    color: #58a6ff;
                 }
-                table {
-                    border-collapse: collapse;
-                    max-width: 100%;
-                }
-                td, th {
-                    padding: 8px;
-                    border: 1px solid #444;
-                }
-                hr {
-                    border: none;
-                    border-top: 1px solid #444;
-                    margin: 16px 0;
-                }
-                /* Hide scrollbar but allow scrolling */
+
+                /* Scrollbar styling */
                 ::-webkit-scrollbar {
                     width: 8px;
                     height: 8px;
@@ -106,7 +83,7 @@ struct MessageWebView {
             </style>
         </head>
         <body>
-            \(content)
+            <div class="orion-mail-content">\(content)</div>
         </body>
         </html>
         """
@@ -140,8 +117,14 @@ struct MessageWebView {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
 
-        // Disable scrolling within the WebView (parent ScrollView handles it)
-        webView.scrollView.isScrollEnabled = false
+        // Enable scrolling so wide emails can scroll horizontally
+        // This allows emails designed for 600px to render at full size
+        webView.scrollView.isScrollEnabled = true
+        webView.scrollView.bounces = true
+
+        // Prevent automatic content scaling
+        webView.scrollView.minimumZoomScale = 1.0
+        webView.scrollView.maximumZoomScale = 3.0
         #endif
 
         return webView
@@ -193,6 +176,8 @@ extension MessageWebView: NSViewRepresentable {
 extension MessageWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let webView = createWebView()
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.heightBinding = _contentHeight
         loadContent(in: webView)
         return webView
     }
@@ -209,8 +194,20 @@ extension MessageWebView: UIViewRepresentable {
         Coordinator()
     }
 
-    class Coordinator {
+    class Coordinator: NSObject, WKNavigationDelegate {
         var lastHtml: String = ""
+        var heightBinding: Binding<CGFloat>?
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // Measure content height after page loads
+            webView.evaluateJavaScript("document.body.scrollHeight") { [weak self] result, error in
+                if let height = result as? CGFloat, height > 0 {
+                    DispatchQueue.main.async {
+                        self?.heightBinding?.wrappedValue = height
+                    }
+                }
+            }
+        }
     }
 }
 #endif

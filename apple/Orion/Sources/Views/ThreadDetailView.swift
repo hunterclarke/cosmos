@@ -357,6 +357,7 @@ struct MessageCard: View {
     let message: FfiMessage
 
     @State private var isExpanded: Bool = true
+    @State private var webViewHeight: CGFloat = 200  // Initial height, will be updated
 
     private var formattedDate: String {
         let date = Date(timeIntervalSince1970: TimeInterval(message.receivedAt))
@@ -443,11 +444,11 @@ struct MessageCard: View {
     private var messageBody: some View {
         if let html = message.bodyHtml, !html.isEmpty {
             // Render HTML content with WKWebView
-            // iOS: Allow content to determine height (no maxHeight)
-            // macOS: Use constrained height
+            // Use dynamic height up to a max, WebView scrolls internally for longer content
             #if os(iOS)
-            MessageWebView(html: html)
-                .frame(minHeight: 200)
+            let maxHeight: CGFloat = 500
+            MessageWebView(html: html, contentHeight: $webViewHeight)
+                .frame(height: min(webViewHeight, maxHeight))
             #else
             MessageWebView(html: html)
                 .frame(minHeight: 100, maxHeight: 600)
