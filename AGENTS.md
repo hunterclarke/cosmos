@@ -130,17 +130,18 @@ use mail::{
 ```
 
 **Key modules:**
-- `models/` - Domain types (Thread, Message, EmailAddress, SyncState, Label)
+- `models/` - Domain types (Thread, Message, Account, EmailAddress, SyncState, Label)
 - `gmail/` - Gmail API client, OAuth, History API, and Labels API (uses `ureq` for sync HTTP)
-- `storage/` - Storage trait abstractions with InMemoryMailStore and RedbMailStore
+- `storage/` - Storage trait abstractions with InMemoryMailStore and SqliteMailStore
 - `sync/` - Idempotent sync engine with incremental sync support
 - `query/` - Query API for UI consumption
 - `search/` - Full-text search using Tantivy (Phase 3)
+- `actions/` - Email action handlers (archive, star, read, trash)
 - `config` - Gmail credential loading
 
 **Storage implementations:**
 - `InMemoryMailStore` - For testing and development
-- `RedbMailStore` - Persistent storage using redb (Phase 2)
+- `SqliteMailStore` - Persistent storage using SQLite with zstd compression
 
 **Sync modes (Phase 2):**
 - Initial sync: Full fetch of entire mailbox (all labels, not just inbox)
@@ -344,13 +345,19 @@ Icon::new(MyIcon)
 ## Cosmos Integration
 
 The `mail` crate uses trait abstractions for storage:
-- `MailStore` trait - Abstract storage interface
+- `MailStore` trait - Abstract storage interface with multi-account support
 - `InMemoryMailStore` - In-memory stub for testing
-- `RedbMailStore` - Persistent storage using redb (Phase 2)
+- `SqliteMailStore` - Persistent storage using SQLite
 
-**Phase 2**: Uses `redb` for persistent local storage at `~/.config/cosmos/mail.redb`. The `MailStore` trait allows swapping implementations.
+**Current Phase**: Uses SQLite for persistent local storage at `~/.config/cosmos/mail.db`. The `MailStore` trait allows swapping implementations.
 
-**Future**: Real Cosmos graph storage implementations may replace redb in later phases.
+**Multi-Account Support**: The system supports multiple Gmail accounts with:
+- Unified inbox view (all accounts combined)
+- Per-account filtering via sidebar selection
+- Account metadata stored in SQLite `accounts` table
+- OAuth tokens can be stored per-account (in database or files)
+
+**Future**: Real Cosmos graph storage implementations may replace SQLite in later phases.
 
 ## Rust Edition
 
@@ -428,7 +435,8 @@ To use Gmail integration:
    - Token saved to `~/.config/cosmos/gmail-tokens.json`
 
 **Data files:**
-- `~/.config/cosmos/mail.redb` - Persistent mail storage (threads, messages, sync state)
-- `~/.config/cosmos/mail.search.idx/` - Tantivy search index directory (Phase 3)
-- `~/.config/cosmos/gmail-tokens.json` - OAuth tokens
+- `~/.config/cosmos/mail.db` - SQLite database (accounts, threads, messages, sync state)
+- `~/.config/cosmos/mail.blobs/` - Blob storage for message bodies
+- `~/.config/cosmos/mail.search.idx/` - Tantivy search index directory
+- `~/.config/cosmos/gmail-tokens-{email}.json` - Per-account OAuth tokens (legacy file storage)
 - `~/.config/cosmos/google-credentials.json` - OAuth client credentials

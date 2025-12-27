@@ -34,6 +34,8 @@ impl From<&str> for ThreadId {
 pub struct Thread {
     /// Gmail thread ID
     pub id: ThreadId,
+    /// Account this thread belongs to (foreign key to accounts table)
+    pub account_id: i64,
     /// Subject line of the thread
     pub subject: String,
     /// Preview text (snippet) of the latest message
@@ -57,6 +59,7 @@ impl Thread {
     /// Create a new thread with the given properties
     pub fn new(
         id: ThreadId,
+        account_id: i64,
         subject: String,
         snippet: String,
         last_message_at: DateTime<Utc>,
@@ -67,6 +70,7 @@ impl Thread {
     ) -> Self {
         Self {
             id,
+            account_id,
             subject,
             snippet,
             last_message_at,

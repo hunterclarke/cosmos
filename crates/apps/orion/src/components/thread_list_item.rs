@@ -11,6 +11,8 @@ use mail::ThreadSummary;
 pub struct ThreadListItem {
     thread: ThreadSummary,
     is_selected: bool,
+    /// Account email to show in unified view (None = single account, no need to show)
+    account_email: Option<String>,
 }
 
 impl ThreadListItem {
@@ -18,7 +20,14 @@ impl ThreadListItem {
         Self {
             thread,
             is_selected,
+            account_email: None,
         }
+    }
+
+    /// Set the account email to display (for unified view)
+    pub fn with_account(mut self, email: Option<String>) -> Self {
+        self.account_email = email;
+        self
     }
 
     fn format_date(&self) -> String {
@@ -94,33 +103,51 @@ impl RenderOnce for ThreadListItem {
                             .flex_shrink_0()
                             .when(is_unread, |el| el.bg(theme.primary)),
                     )
-                    // Column 1: Sender with message count
-                    .child(
+                    // Column 1: Sender with message count (and account in unified view)
+                    .child({
+                        let account_email = self.account_email.clone();
                         div()
                             .w(px(180.))
                             .flex_shrink_0()
                             .flex()
-                            .items_center()
-                            .gap_1()
+                            .flex_col()
+                            .justify_center()
                             .overflow_hidden()
+                            // Main row: sender + message count
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(text_weight)
-                                    .text_color(theme.foreground)
-                                    .text_ellipsis()
-                                    .child(sender_display),
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(text_weight)
+                                            .text_color(theme.foreground)
+                                            .text_ellipsis()
+                                            .child(sender_display),
+                                    )
+                                    .when(message_count > 1, |el| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .flex_shrink_0()
+                                                .child(format!("({})", message_count)),
+                                        )
+                                    }),
                             )
-                            .when(message_count > 1, |el| {
+                            // Secondary row: account email (unified view only)
+                            .when_some(account_email, |el, email| {
                                 el.child(
                                     div()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .flex_shrink_0()
-                                        .child(format!("({})", message_count)),
+                                        .text_ellipsis()
+                                        .child(email),
                                 )
-                            }),
-                    )
+                            })
+                    })
                     // Column 2: Subject - preview (fills remaining space)
                     .child(
                         div()

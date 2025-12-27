@@ -121,6 +121,9 @@ impl SearchIndex {
         doc.add_text(self.fields.thread_id, thread.id.as_str());
         doc.add_text(self.fields.message_id, message.id.as_str());
 
+        // Account ID for multi-account filtering
+        doc.add_i64(self.fields.account_id, thread.account_id);
+
         // Text content
         doc.add_text(self.fields.subject, &message.subject);
         if let Some(ref body) = message.body_text {
@@ -212,16 +215,18 @@ impl SearchIndex {
     /// Search for threads matching the query
     ///
     /// Returns deduplicated results by thread_id, sorted by relevance score.
+    /// If `account_id` is Some, only returns results from that account.
     pub fn search(
         &self,
         query: &ParsedQuery,
         limit: usize,
         store: &dyn MailStore,
+        account_id: Option<i64>,
     ) -> Result<Vec<SearchResult>> {
         let searcher = self.reader.searcher();
 
         // Build Tantivy query from ParsedQuery
-        let tantivy_query = self.build_query(query)?;
+        let tantivy_query = self.build_query(query, account_id)?;
 
         // Execute search - fetch extra to account for deduplication
         let top_docs = searcher.search(&tantivy_query, &TopDocs::with_limit(limit * 3))?;
@@ -274,8 +279,17 @@ impl SearchIndex {
     }
 
     /// Build a Tantivy query from ParsedQuery
-    fn build_query(&self, query: &ParsedQuery) -> Result<Box<dyn Query>> {
+    fn build_query(&self, query: &ParsedQuery, account_id: Option<i64>) -> Result<Box<dyn Query>> {
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+        // Account filter
+        if let Some(id) = account_id {
+            let term = Term::from_field_i64(self.fields.account_id, id);
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+            ));
+        }
 
         // Free-text terms - search across multiple fields
         if !query.terms.is_empty() {
@@ -490,6 +504,7 @@ mod tests {
     fn create_test_thread(id: &str, subject: &str) -> Thread {
         Thread {
             id: ThreadId::new(id),
+            account_id: 1,
             subject: subject.to_string(),
             snippet: "Test snippet".to_string(),
             last_message_at: Utc::now(),
@@ -518,7 +533,7 @@ mod tests {
 
         // Search for it
         let query = super::super::parse_query("meeting");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].thread_id.as_str(), "thread1");
@@ -543,12 +558,12 @@ mod tests {
 
         // Search by from
         let query = super::super::parse_query("from:alice");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
         assert_eq!(results.len(), 1);
 
         // Search by different sender (no results)
         let query2 = super::super::parse_query("from:bob");
-        let results2 = index.search(&query2, 10, &store)?;
+        let results2 = index.search(&query2, 10, &store, None)?;
         assert_eq!(results2.len(), 0);
 
         Ok(())
@@ -570,12 +585,12 @@ mod tests {
 
         // Search in:inbox
         let query = super::super::parse_query("in:inbox");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
         assert_eq!(results.len(), 1);
 
         // Search in:sent (no results)
         let query2 = super::super::parse_query("in:sent");
-        let results2 = index.search(&query2, 10, &store)?;
+        let results2 = index.search(&query2, 10, &store, None)?;
         assert_eq!(results2.len(), 0);
 
         Ok(())
@@ -600,7 +615,7 @@ mod tests {
 
         // Search should return only one result (deduplicated by thread)
         let query = super::super::parse_query("project");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].thread_id.as_str(), "thread1");
 
@@ -622,7 +637,7 @@ mod tests {
 
         // Verify it's indexed
         let query = super::super::parse_query("test");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
         assert_eq!(results.len(), 1);
 
         // Delete the thread
@@ -630,7 +645,7 @@ mod tests {
         index.commit()?;
 
         // Verify it's gone
-        let results2 = index.search(&query, 10, &store)?;
+        let results2 = index.search(&query, 10, &store, None)?;
         assert_eq!(results2.len(), 0);
 
         Ok(())
@@ -654,7 +669,7 @@ mod tests {
 
         // Verify search works
         let query = super::super::parse_query("rebuild");
-        let results = index.search(&query, 10, &store)?;
+        let results = index.search(&query, 10, &store, None)?;
         assert_eq!(results.len(), 1);
 
         Ok(())

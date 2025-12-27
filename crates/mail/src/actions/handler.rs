@@ -295,6 +295,7 @@ mod tests {
     fn make_test_thread(id: &str) -> Thread {
         Thread::new(
             ThreadId::new(id),
+            1, // account_id
             "Test Subject".to_string(),
             "Test snippet".to_string(),
             Utc::now(),

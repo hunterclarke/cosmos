@@ -1,6 +1,6 @@
 //! Storage trait definitions
 
-use crate::models::{EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
+use crate::models::{Account, EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
@@ -29,6 +29,8 @@ pub struct MessageMetadata {
     pub id: MessageId,
     /// ID of the thread this message belongs to
     pub thread_id: ThreadId,
+    /// Account ID this message belongs to
+    pub account_id: i64,
     /// Sender's email address
     pub from: EmailAddress,
     /// Recipients (To field)
@@ -57,6 +59,7 @@ impl MessageMetadata {
         Message {
             id: self.id,
             thread_id: self.thread_id,
+            account_id: self.account_id,
             from: self.from,
             to: self.to,
             cc: self.cc,
@@ -76,6 +79,7 @@ impl From<&Message> for MessageMetadata {
         Self {
             id: msg.id.clone(),
             thread_id: msg.thread_id.clone(),
+            account_id: msg.account_id,
             from: msg.from.clone(),
             to: msg.to.clone(),
             cc: msg.cc.clone(),
@@ -212,13 +216,13 @@ pub trait MailStore: Send + Sync {
     // === Phase 2: Sync State Methods ===
 
     /// Get sync state for an account
-    fn get_sync_state(&self, account_id: &str) -> Result<Option<SyncState>>;
+    fn get_sync_state(&self, account_id: i64) -> Result<Option<SyncState>>;
 
     /// Save sync state (upsert)
     fn save_sync_state(&self, state: SyncState) -> Result<()>;
 
     /// Delete sync state for an account
-    fn delete_sync_state(&self, account_id: &str) -> Result<()>;
+    fn delete_sync_state(&self, account_id: i64) -> Result<()>;
 
     /// Check if thread exists by external ID
     fn has_thread(&self, id: &ThreadId) -> Result<bool>;
@@ -251,8 +255,13 @@ pub trait MailStore: Send + Sync {
     ///
     /// This allows fetching at max Gmail API speed without blocking on processing.
     /// Messages are stored with their label_ids for prioritization (INBOX first).
-    fn store_pending_message(&self, id: &MessageId, data: &[u8], label_ids: Vec<String>)
-        -> Result<()>;
+    fn store_pending_message(
+        &self,
+        id: &MessageId,
+        account_id: i64,
+        data: &[u8],
+        label_ids: Vec<String>,
+    ) -> Result<()>;
 
     /// Check if a pending message exists
     fn has_pending_message(&self, id: &MessageId) -> Result<bool>;
@@ -261,7 +270,12 @@ pub trait MailStore: Send + Sync {
     ///
     /// Returns messages with the given label first. If label is None, returns
     /// messages in arbitrary order. Limit controls batch size.
-    fn get_pending_messages(&self, label: Option<&str>, limit: usize) -> Result<Vec<PendingMessage>>;
+    fn get_pending_messages(
+        &self,
+        account_id: i64,
+        label: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PendingMessage>>;
 
     /// Delete a pending message after successful processing
     ///
@@ -269,8 +283,82 @@ pub trait MailStore: Send + Sync {
     fn delete_pending_message(&self, id: &MessageId) -> Result<()>;
 
     /// Count pending messages (optionally filtered by label)
-    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize>;
+    fn count_pending_messages(&self, account_id: i64, label: Option<&str>) -> Result<usize>;
 
     /// Clear all pending messages
     fn clear_pending_messages(&self) -> Result<()>;
+
+    // === Multi-Account Support Methods ===
+
+    /// Register a new account
+    ///
+    /// The account's `id` field should be 0 when passed in; the storage
+    /// will assign a new unique ID and return the account with that ID set.
+    fn register_account(&self, account: Account) -> Result<Account>;
+
+    /// Get an account by ID
+    fn get_account(&self, account_id: i64) -> Result<Option<Account>>;
+
+    /// Get an account by email address
+    fn get_account_by_email(&self, email: &str) -> Result<Option<Account>>;
+
+    /// List all registered accounts
+    fn list_accounts(&self) -> Result<Vec<Account>>;
+
+    /// Delete an account and all its data
+    ///
+    /// This removes the account record and all associated threads, messages,
+    /// pending messages, and sync state.
+    fn delete_account(&self, account_id: i64) -> Result<()>;
+
+    /// Update an account's OAuth token data
+    ///
+    /// Stores the JSON-serialized token data for the account.
+    fn update_account_token(&self, account_id: i64, token_data: Option<String>) -> Result<()>;
+
+    /// List threads with optional account filter
+    ///
+    /// If `account_id` is None, returns threads from all accounts (unified view).
+    /// If `account_id` is Some, returns only threads from that account.
+    fn list_threads_for_account(
+        &self,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>>;
+
+    /// List threads by label with optional account filter
+    ///
+    /// If `account_id` is None, returns threads from all accounts with the label.
+    /// If `account_id` is Some, returns only threads from that account with the label.
+    fn list_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>>;
+
+    /// Count threads with optional account filter
+    fn count_threads_for_account(&self, account_id: Option<i64>) -> Result<usize>;
+
+    /// Count threads by label with optional account filter
+    fn count_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize>;
+
+    /// Count unread threads by label with optional account filter
+    fn count_unread_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize>;
+
+    /// Clear all data for a specific account
+    ///
+    /// Removes threads, messages, pending messages, and sync state for the account,
+    /// but keeps the account record itself.
+    fn clear_account_data(&self, account_id: i64) -> Result<()>;
 }

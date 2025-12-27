@@ -10,7 +10,7 @@ use super::api::{GmailMessage, MessagePart, MessagePayload};
 use crate::models::{EmailAddress, Message, MessageId, ThreadId};
 
 /// Normalize a Gmail API message to an Orion Message
-pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
+pub fn normalize_message(gmail_msg: GmailMessage, account_id: i64) -> Result<Message> {
     let id = MessageId::new(&gmail_msg.id);
     let thread_id = ThreadId::new(&gmail_msg.thread_id);
 
@@ -56,6 +56,7 @@ pub fn normalize_message(gmail_msg: GmailMessage) -> Result<Message> {
     let label_ids = gmail_msg.label_ids.unwrap_or_default();
 
     Ok(Message::builder(id, thread_id)
+        .account_id(account_id)
         .from(from)
         .to(to)
         .cc(cc)

@@ -8,6 +8,7 @@ use tantivy::schema::{
 ///
 /// Fields indexed:
 /// - thread_id, message_id: String IDs for retrieval
+/// - account_id: Account FK for multi-account filtering
 /// - subject, body_text, snippet: Full-text searchable content
 /// - from, from_email, to, cc: Sender/recipient search
 /// - labels: Exact match label filtering
@@ -19,6 +20,9 @@ pub fn build_schema() -> Schema {
     // ID fields (stored for retrieval, STRING for exact match)
     builder.add_text_field("thread_id", STRING | STORED);
     builder.add_text_field("message_id", STRING | STORED);
+
+    // Account ID for multi-account filtering (FAST for filtering, STORED for retrieval)
+    builder.add_i64_field("account_id", FAST | STORED);
 
     // Full-text fields with positions for phrase queries and highlighting
     let text_opts = TextOptions::default()
@@ -55,6 +59,7 @@ pub fn build_schema() -> Schema {
 pub struct SchemaFields {
     pub thread_id: Field,
     pub message_id: Field,
+    pub account_id: Field,
     pub subject: Field,
     pub body_text: Field,
     pub snippet: Field,
@@ -75,6 +80,7 @@ impl SchemaFields {
         Self {
             thread_id: schema.get_field("thread_id").expect("thread_id field"),
             message_id: schema.get_field("message_id").expect("message_id field"),
+            account_id: schema.get_field("account_id").expect("account_id field"),
             subject: schema.get_field("subject").expect("subject field"),
             body_text: schema.get_field("body_text").expect("body_text field"),
             snippet: schema.get_field("snippet").expect("snippet field"),
@@ -103,6 +109,7 @@ mod tests {
         // Verify all fields exist
         assert!(schema.get_field("thread_id").is_ok());
         assert!(schema.get_field("message_id").is_ok());
+        assert!(schema.get_field("account_id").is_ok());
         assert!(schema.get_field("subject").is_ok());
         assert!(schema.get_field("body_text").is_ok());
         assert!(schema.get_field("snippet").is_ok());
@@ -118,5 +125,6 @@ mod tests {
 
         // Verify SchemaFields matches
         assert_eq!(fields.thread_id, schema.get_field("thread_id").unwrap());
+        assert_eq!(fields.account_id, schema.get_field("account_id").unwrap());
     }
 }

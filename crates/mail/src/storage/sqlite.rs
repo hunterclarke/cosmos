@@ -9,29 +9,42 @@ use rusqlite_migration::{M, Migrations};
 
 use super::blob::BlobStore;
 use super::traits::{MailStore, MessageBody, MessageMetadata, PendingMessage};
-use crate::models::{EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
+use crate::models::{Account, EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
 
 /// Database migrations
 ///
-/// Each migration is applied in order. The user_version pragma tracks which
-/// migrations have been applied.
+/// Single consolidated schema for multi-account support.
+/// No backwards compatibility - database will be cleared before running.
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![
-        // Migration 1: Initial schema
-        M::up(
-            r#"
+    Migrations::new(vec![M::up(
+        r#"
+            -- Accounts registry (must be created first for FK references)
+            CREATE TABLE accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                avatar_color TEXT NOT NULL,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                added_at TEXT NOT NULL,
+                token_data TEXT
+            );
+
             -- Sync state per account
             CREATE TABLE sync_state (
-                account_id TEXT PRIMARY KEY,
+                account_id INTEGER PRIMARY KEY REFERENCES accounts(id),
                 history_id TEXT NOT NULL,
                 last_sync_at TEXT NOT NULL,
                 sync_version INTEGER NOT NULL DEFAULT 1,
-                initial_sync_complete INTEGER NOT NULL DEFAULT 0
+                initial_sync_complete INTEGER NOT NULL DEFAULT 0,
+                fetch_page_token TEXT,
+                messages_listed INTEGER NOT NULL DEFAULT 0,
+                failed_message_ids TEXT NOT NULL DEFAULT '[]'
             );
 
             -- Thread metadata
             CREATE TABLE threads (
                 id TEXT PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
                 subject TEXT NOT NULL,
                 snippet TEXT NOT NULL,
                 last_message_at TEXT NOT NULL,
@@ -41,13 +54,15 @@ fn migrations() -> Migrations<'static> {
                 is_unread INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE INDEX idx_threads_last_message_at
-                ON threads(last_message_at DESC);
+            CREATE INDEX idx_threads_last_message_at ON threads(last_message_at DESC);
+            CREATE INDEX idx_threads_account ON threads(account_id);
+            CREATE INDEX idx_threads_account_last_message ON threads(account_id, last_message_at DESC);
 
             -- Message metadata with zstd-compressed bodies
             CREATE TABLE messages (
                 id TEXT PRIMARY KEY,
-                thread_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
                 from_name TEXT,
                 from_email TEXT NOT NULL,
                 subject TEXT NOT NULL,
@@ -56,75 +71,64 @@ fn migrations() -> Migrations<'static> {
                 internal_date INTEGER NOT NULL,
                 has_body_text INTEGER NOT NULL DEFAULT 0,
                 has_body_html INTEGER NOT NULL DEFAULT 0,
-                body_text BLOB,  -- zstd compressed
-                body_html BLOB,  -- zstd compressed
-                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+                body_text BLOB,
+                body_html BLOB
             );
 
             CREATE INDEX idx_messages_thread_id ON messages(thread_id);
             CREATE INDEX idx_messages_received_at ON messages(received_at ASC);
+            CREATE INDEX idx_messages_account ON messages(account_id);
 
             -- Recipients (normalized, many-to-many)
             CREATE TABLE message_recipients (
-                message_id TEXT NOT NULL,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 recipient_type TEXT NOT NULL,
                 name TEXT,
                 email TEXT NOT NULL,
                 position INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (message_id, recipient_type, position),
-                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                PRIMARY KEY (message_id, recipient_type, position)
             );
 
             -- Labels on messages (many-to-many)
             CREATE TABLE message_labels (
-                message_id TEXT NOT NULL,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                 label_id TEXT NOT NULL,
-                PRIMARY KEY (message_id, label_id),
-                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                PRIMARY KEY (message_id, label_id)
             );
 
             CREATE INDEX idx_message_labels_label ON message_labels(label_id);
 
             -- Thread-label index for efficient list_threads_by_label
             CREATE TABLE thread_labels (
-                thread_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                account_id INTEGER NOT NULL,
                 label_id TEXT NOT NULL,
                 last_message_at TEXT NOT NULL,
-                PRIMARY KEY (thread_id, label_id),
-                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+                PRIMARY KEY (thread_id, label_id)
             );
 
-            CREATE INDEX idx_thread_labels_query
-                ON thread_labels(label_id, last_message_at DESC);
+            CREATE INDEX idx_thread_labels_account_query ON thread_labels(account_id, label_id, last_message_at DESC);
 
             -- Pending messages queue
             CREATE TABLE pending_messages (
                 id TEXT PRIMARY KEY,
+                account_id INTEGER NOT NULL,
                 data BLOB NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE INDEX idx_pending_account ON pending_messages(account_id);
+
             -- Labels on pending messages for prioritization
             CREATE TABLE pending_message_labels (
-                message_id TEXT NOT NULL,
+                message_id TEXT NOT NULL REFERENCES pending_messages(id) ON DELETE CASCADE,
                 label_id TEXT NOT NULL,
-                PRIMARY KEY (message_id, label_id),
-                FOREIGN KEY (message_id) REFERENCES pending_messages(id) ON DELETE CASCADE
+                PRIMARY KEY (message_id, label_id)
             );
 
             CREATE INDEX idx_pending_labels ON pending_message_labels(label_id);
             "#,
-        ),
-        // Migration 2: Add sync resilience fields
-        M::up(
-            r#"
-            -- Add fetch progress checkpointing fields to sync_state
-            ALTER TABLE sync_state ADD COLUMN fetch_page_token TEXT;
-            ALTER TABLE sync_state ADD COLUMN messages_listed INTEGER NOT NULL DEFAULT 0;
-            ALTER TABLE sync_state ADD COLUMN failed_message_ids TEXT NOT NULL DEFAULT '[]';
-            "#,
-        ),
-    ])
+    )])
 }
 
 /// SQLite-based mail storage
@@ -198,16 +202,16 @@ impl SqliteMailStore {
 
     /// Update the thread_labels denormalized index for a thread
     fn update_thread_labels(&self, conn: &Connection, thread_id: &str) -> Result<()> {
-        // Get thread's last_message_at
-        let last_message_at: Option<String> = conn
+        // Get thread's last_message_at and account_id
+        let thread_info: Option<(String, i64)> = conn
             .query_row(
-                "SELECT last_message_at FROM threads WHERE id = ?",
+                "SELECT last_message_at, account_id FROM threads WHERE id = ?",
                 [thread_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
 
-        let Some(last_message_at) = last_message_at else {
+        let Some((last_message_at, account_id)) = thread_info else {
             return Ok(());
         };
 
@@ -226,11 +230,11 @@ impl SqliteMailStore {
 
         // Insert new entries
         let mut insert_stmt = conn.prepare(
-            "INSERT INTO thread_labels (thread_id, label_id, last_message_at) VALUES (?, ?, ?)",
+            "INSERT INTO thread_labels (thread_id, account_id, label_id, last_message_at) VALUES (?, ?, ?, ?)",
         )?;
 
         for label in labels {
-            insert_stmt.execute(params![thread_id, label, last_message_at])?;
+            insert_stmt.execute(params![thread_id, account_id, label, last_message_at])?;
         }
 
         Ok(())
@@ -319,6 +323,7 @@ impl SqliteMailStore {
         let row: Option<(
             String,
             String,
+            i64,
             Option<String>,
             String,
             String,
@@ -329,7 +334,7 @@ impl SqliteMailStore {
             bool,
         )> = conn
             .query_row(
-                "SELECT id, thread_id, from_name, from_email, subject, body_preview,
+                "SELECT id, thread_id, account_id, from_name, from_email, subject, body_preview,
                         received_at, internal_date, has_body_text, has_body_html
                  FROM messages WHERE id = ?",
                 [message_id],
@@ -345,6 +350,7 @@ impl SqliteMailStore {
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
+                        row.get(10)?,
                     ))
                 },
             )
@@ -353,6 +359,7 @@ impl SqliteMailStore {
         let Some((
             id,
             thread_id,
+            account_id,
             from_name,
             from_email,
             subject,
@@ -377,6 +384,7 @@ impl SqliteMailStore {
         Ok(Some(MessageMetadata {
             id: MessageId::new(id),
             thread_id: ThreadId::new(thread_id),
+            account_id,
             from: EmailAddress {
                 name: from_name,
                 email: from_email,
@@ -403,9 +411,10 @@ impl MailStore for SqliteMailStore {
         // and deletes all messages referencing the thread!
         conn.execute(
             "INSERT INTO threads
-             (id, subject, snippet, last_message_at, message_count, sender_name, sender_email, is_unread)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, account_id, subject, snippet, last_message_at, message_count, sender_name, sender_email, is_unread)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
+                account_id = excluded.account_id,
                 subject = excluded.subject,
                 snippet = excluded.snippet,
                 last_message_at = excluded.last_message_at,
@@ -415,6 +424,7 @@ impl MailStore for SqliteMailStore {
                 is_unread = excluded.is_unread",
             params![
                 thread.id.as_str(),
+                thread.account_id,
                 thread.subject,
                 thread.snippet,
                 thread.last_message_at.to_rfc3339(),
@@ -465,12 +475,13 @@ impl MailStore for SqliteMailStore {
         // Use ON CONFLICT DO UPDATE to avoid CASCADE delete issues
         tx.execute(
             "INSERT INTO messages
-             (id, thread_id, from_name, from_email, subject, body_preview,
+             (id, thread_id, account_id, from_name, from_email, subject, body_preview,
               received_at, internal_date, has_body_text, has_body_html,
               body_text, body_html)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 thread_id = excluded.thread_id,
+                account_id = excluded.account_id,
                 from_name = excluded.from_name,
                 from_email = excluded.from_email,
                 subject = excluded.subject,
@@ -484,6 +495,7 @@ impl MailStore for SqliteMailStore {
             params![
                 message.id.as_str(),
                 message.thread_id.as_str(),
+                message.account_id,
                 message.from.name,
                 message.from.email,
                 message.subject,
@@ -522,6 +534,7 @@ impl MailStore for SqliteMailStore {
 
         let row: Option<(
             String,
+            i64,
             String,
             String,
             String,
@@ -531,7 +544,7 @@ impl MailStore for SqliteMailStore {
             bool,
         )> = conn
             .query_row(
-                "SELECT id, subject, snippet, last_message_at, message_count,
+                "SELECT id, account_id, subject, snippet, last_message_at, message_count,
                         sender_name, sender_email, is_unread
                  FROM threads WHERE id = ?",
                 [id.as_str()],
@@ -545,6 +558,7 @@ impl MailStore for SqliteMailStore {
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )
@@ -552,6 +566,7 @@ impl MailStore for SqliteMailStore {
 
         let Some((
             id,
+            account_id,
             subject,
             snippet,
             last_message_at_str,
@@ -570,6 +585,7 @@ impl MailStore for SqliteMailStore {
 
         Ok(Some(Thread {
             id: ThreadId::new(id),
+            account_id,
             subject,
             snippet,
             last_message_at,
@@ -643,7 +659,7 @@ impl MailStore for SqliteMailStore {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
-            "SELECT id, subject, snippet, last_message_at, message_count,
+            "SELECT id, account_id, subject, snippet, last_message_at, message_count,
                     sender_name, sender_email, is_unread
              FROM threads
              ORDER BY last_message_at DESC
@@ -652,20 +668,21 @@ impl MailStore for SqliteMailStore {
 
         let threads = stmt
             .query_map(params![limit as i64, offset as i64], |row| {
-                let last_message_at_str: String = row.get(3)?;
+                let last_message_at_str: String = row.get(4)?;
                 let last_message_at = chrono::DateTime::parse_from_rfc3339(&last_message_at_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 Ok(Thread {
                     id: ThreadId::new(row.get::<_, String>(0)?),
-                    subject: row.get(1)?,
-                    snippet: row.get(2)?,
+                    account_id: row.get(1)?,
+                    subject: row.get(2)?,
+                    snippet: row.get(3)?,
                     last_message_at,
-                    message_count: row.get::<_, i64>(4)? as usize,
-                    sender_name: row.get(5)?,
-                    sender_email: row.get(6)?,
-                    is_unread: row.get(7)?,
+                    message_count: row.get::<_, i64>(5)? as usize,
+                    sender_name: row.get(6)?,
+                    sender_email: row.get(7)?,
+                    is_unread: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -682,7 +699,7 @@ impl MailStore for SqliteMailStore {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.subject, t.snippet, t.last_message_at, t.message_count,
+            "SELECT t.id, t.account_id, t.subject, t.snippet, t.last_message_at, t.message_count,
                     t.sender_name, t.sender_email, t.is_unread
              FROM threads t
              INNER JOIN thread_labels tl ON t.id = tl.thread_id
@@ -693,20 +710,21 @@ impl MailStore for SqliteMailStore {
 
         let threads = stmt
             .query_map(params![label, limit as i64, offset as i64], |row| {
-                let last_message_at_str: String = row.get(3)?;
+                let last_message_at_str: String = row.get(4)?;
                 let last_message_at = chrono::DateTime::parse_from_rfc3339(&last_message_at_str)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 Ok(Thread {
                     id: ThreadId::new(row.get::<_, String>(0)?),
-                    subject: row.get(1)?,
-                    snippet: row.get(2)?,
+                    account_id: row.get(1)?,
+                    subject: row.get(2)?,
+                    snippet: row.get(3)?,
                     last_message_at,
-                    message_count: row.get::<_, i64>(4)? as usize,
-                    sender_name: row.get(5)?,
-                    sender_email: row.get(6)?,
-                    is_unread: row.get(7)?,
+                    message_count: row.get::<_, i64>(5)? as usize,
+                    sender_name: row.get(6)?,
+                    sender_email: row.get(7)?,
+                    is_unread: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -825,10 +843,10 @@ impl MailStore for SqliteMailStore {
         Ok(())
     }
 
-    fn get_sync_state(&self, account_id: &str) -> Result<Option<SyncState>> {
+    fn get_sync_state(&self, account_id: i64) -> Result<Option<SyncState>> {
         let conn = self.conn.lock().unwrap();
 
-        let row: Option<(String, String, String, u32, bool, Option<String>, i64, String)> = conn
+        let row: Option<(i64, String, String, u32, bool, Option<String>, i64, String)> = conn
             .query_row(
                 "SELECT account_id, history_id, last_sync_at, sync_version, initial_sync_complete,
                         fetch_page_token, messages_listed, failed_message_ids
@@ -909,7 +927,7 @@ impl MailStore for SqliteMailStore {
         Ok(())
     }
 
-    fn delete_sync_state(&self, account_id: &str) -> Result<()> {
+    fn delete_sync_state(&self, account_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sync_state WHERE account_id = ?", [account_id])?;
         Ok(())
@@ -1063,6 +1081,7 @@ impl MailStore for SqliteMailStore {
     fn store_pending_message(
         &self,
         id: &MessageId,
+        account_id: i64,
         data: &[u8],
         label_ids: Vec<String>,
     ) -> Result<()> {
@@ -1070,8 +1089,8 @@ impl MailStore for SqliteMailStore {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT OR REPLACE INTO pending_messages (id, data) VALUES (?, ?)",
-            params![id.as_str(), data],
+            "INSERT OR REPLACE INTO pending_messages (id, account_id, data) VALUES (?, ?, ?)",
+            params![id.as_str(), account_id, data],
         )?;
 
         // Delete old labels first
@@ -1106,6 +1125,7 @@ impl MailStore for SqliteMailStore {
 
     fn get_pending_messages(
         &self,
+        account_id: i64,
         label: Option<&str>,
         limit: usize,
     ) -> Result<Vec<PendingMessage>> {
@@ -1116,11 +1136,11 @@ impl MailStore for SqliteMailStore {
             let mut stmt = conn.prepare(
                 "SELECT p.id, p.data FROM pending_messages p
                  INNER JOIN pending_message_labels pl ON p.id = pl.message_id
-                 WHERE pl.label_id = ?
+                 WHERE p.account_id = ? AND pl.label_id = ?
                  LIMIT ?",
             )?;
 
-            stmt.query_map(params![label, limit as i64], |row| {
+            stmt.query_map(params![account_id, label, limit as i64], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -1129,12 +1149,14 @@ impl MailStore for SqliteMailStore {
             let mut inbox_stmt = conn.prepare(
                 "SELECT p.id, p.data FROM pending_messages p
                  INNER JOIN pending_message_labels pl ON p.id = pl.message_id
-                 WHERE pl.label_id = 'INBOX'
+                 WHERE p.account_id = ? AND pl.label_id = 'INBOX'
                  LIMIT ?",
             )?;
 
             let inbox: Vec<(String, Vec<u8>)> = inbox_stmt
-                .query_map(params![limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map(params![account_id, limit as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
 
             if inbox.len() >= limit {
@@ -1145,12 +1167,12 @@ impl MailStore for SqliteMailStore {
 
                 let mut other_stmt = conn.prepare(
                     "SELECT id, data FROM pending_messages
-                     WHERE id NOT IN (SELECT message_id FROM pending_message_labels WHERE label_id = 'INBOX')
+                     WHERE account_id = ? AND id NOT IN (SELECT message_id FROM pending_message_labels WHERE label_id = 'INBOX')
                      LIMIT ?",
                 )?;
 
                 let others: Vec<(String, Vec<u8>)> = other_stmt
-                    .query_map(params![remaining as i64], |row| {
+                    .query_map(params![account_id, remaining as i64], |row| {
                         Ok((row.get(0)?, row.get(1)?))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1191,21 +1213,23 @@ impl MailStore for SqliteMailStore {
         Ok(())
     }
 
-    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize> {
+    fn count_pending_messages(&self, account_id: i64, label: Option<&str>) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
 
         let count: i64 = if let Some(label) = label {
             conn.query_row(
                 "SELECT COUNT(DISTINCT p.id) FROM pending_messages p
                  INNER JOIN pending_message_labels pl ON p.id = pl.message_id
-                 WHERE pl.label_id = ?",
-                [label],
+                 WHERE p.account_id = ? AND pl.label_id = ?",
+                params![account_id, label],
                 |row| row.get(0),
             )?
         } else {
-            conn.query_row("SELECT COUNT(*) FROM pending_messages", [], |row| {
-                row.get(0)
-            })?
+            conn.query_row(
+                "SELECT COUNT(*) FROM pending_messages WHERE account_id = ?",
+                [account_id],
+                |row| row.get(0),
+            )?
         };
 
         Ok(count as usize)
@@ -1215,6 +1239,437 @@ impl MailStore for SqliteMailStore {
         let conn = self.conn.lock().unwrap();
         // Labels are deleted via CASCADE
         conn.execute("DELETE FROM pending_messages", [])?;
+        Ok(())
+    }
+
+    // === Multi-Account Support Methods ===
+
+    fn register_account(&self, account: Account) -> Result<Account> {
+        let conn = self.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (email, display_name, avatar_color, is_primary, added_at, token_data)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                account.email,
+                account.display_name,
+                account.avatar_color,
+                account.is_primary,
+                account.added_at.to_rfc3339(),
+                account.token_data,
+            ],
+        )?;
+
+        let id = conn.last_insert_rowid();
+
+        Ok(Account {
+            id,
+            email: account.email,
+            display_name: account.display_name,
+            avatar_color: account.avatar_color,
+            is_primary: account.is_primary,
+            added_at: account.added_at,
+            token_data: account.token_data,
+        })
+    }
+
+    fn get_account(&self, account_id: i64) -> Result<Option<Account>> {
+        let conn = self.conn.lock().unwrap();
+
+        let row: Option<(i64, String, Option<String>, String, bool, String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, email, display_name, avatar_color, is_primary, added_at, token_data
+                 FROM accounts WHERE id = ?",
+                [account_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, email, display_name, avatar_color, is_primary, added_at_str, token_data)) = row else {
+            return Ok(None);
+        };
+
+        let added_at = chrono::DateTime::parse_from_rfc3339(&added_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        Ok(Some(Account {
+            id,
+            email,
+            display_name,
+            avatar_color,
+            is_primary,
+            added_at,
+            token_data,
+        }))
+    }
+
+    fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
+        let conn = self.conn.lock().unwrap();
+
+        let row: Option<(i64, String, Option<String>, String, bool, String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, email, display_name, avatar_color, is_primary, added_at, token_data
+                 FROM accounts WHERE email = ?",
+                [email],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, email, display_name, avatar_color, is_primary, added_at_str, token_data)) = row else {
+            return Ok(None);
+        };
+
+        let added_at = chrono::DateTime::parse_from_rfc3339(&added_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        Ok(Some(Account {
+            id,
+            email,
+            display_name,
+            avatar_color,
+            is_primary,
+            added_at,
+            token_data,
+        }))
+    }
+
+    fn list_accounts(&self) -> Result<Vec<Account>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare(
+            "SELECT id, email, display_name, avatar_color, is_primary, added_at, token_data
+             FROM accounts ORDER BY is_primary DESC, added_at ASC",
+        )?;
+
+        let accounts = stmt
+            .query_map([], |row| {
+                let added_at_str: String = row.get(5)?;
+                let added_at = chrono::DateTime::parse_from_rfc3339(&added_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                Ok(Account {
+                    id: row.get(0)?,
+                    email: row.get(1)?,
+                    display_name: row.get(2)?,
+                    avatar_color: row.get(3)?,
+                    is_primary: row.get(4)?,
+                    added_at,
+                    token_data: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(accounts)
+    }
+
+    fn delete_account(&self, account_id: i64) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Delete in dependency order (due to foreign keys)
+        // First clear data associated with the account
+        tx.execute(
+            "DELETE FROM pending_message_labels WHERE message_id IN
+             (SELECT id FROM pending_messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM pending_messages WHERE account_id = ?",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM thread_labels WHERE account_id = ?",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM message_labels WHERE message_id IN
+             (SELECT id FROM messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM message_recipients WHERE message_id IN
+             (SELECT id FROM messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute("DELETE FROM messages WHERE account_id = ?", [account_id])?;
+        tx.execute("DELETE FROM threads WHERE account_id = ?", [account_id])?;
+        tx.execute("DELETE FROM sync_state WHERE account_id = ?", [account_id])?;
+
+        // Finally delete the account itself
+        tx.execute("DELETE FROM accounts WHERE id = ?", [account_id])?;
+
+        tx.commit()?;
+
+        // Also clear blob store for this account (TODO: account-scoped blobs)
+        // For now, this is a best-effort - blobs are keyed by message ID
+        Ok(())
+    }
+
+    fn update_account_token(&self, account_id: i64, token_data: Option<String>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET token_data = ? WHERE id = ?",
+            params![token_data, account_id],
+        )?;
+        Ok(())
+    }
+
+    fn list_threads_for_account(
+        &self,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>> {
+        let conn = self.conn.lock().unwrap();
+
+        let (query, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(id) = account_id {
+            (
+                "SELECT id, account_id, subject, snippet, last_message_at, message_count,
+                        sender_name, sender_email, is_unread
+                 FROM threads
+                 WHERE account_id = ?
+                 ORDER BY last_message_at DESC
+                 LIMIT ? OFFSET ?",
+                vec![
+                    Box::new(id) as Box<dyn rusqlite::ToSql>,
+                    Box::new(limit as i64),
+                    Box::new(offset as i64),
+                ],
+            )
+        } else {
+            (
+                "SELECT id, account_id, subject, snippet, last_message_at, message_count,
+                        sender_name, sender_email, is_unread
+                 FROM threads
+                 ORDER BY last_message_at DESC
+                 LIMIT ? OFFSET ?",
+                vec![
+                    Box::new(limit as i64) as Box<dyn rusqlite::ToSql>,
+                    Box::new(offset as i64),
+                ],
+            )
+        };
+
+        let mut stmt = conn.prepare(query)?;
+
+        let threads = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                let last_message_at_str: String = row.get(4)?;
+                let last_message_at = chrono::DateTime::parse_from_rfc3339(&last_message_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                Ok(Thread {
+                    id: ThreadId::new(row.get::<_, String>(0)?),
+                    account_id: row.get(1)?,
+                    subject: row.get(2)?,
+                    snippet: row.get(3)?,
+                    last_message_at,
+                    message_count: row.get::<_, i64>(5)? as usize,
+                    sender_name: row.get(6)?,
+                    sender_email: row.get(7)?,
+                    is_unread: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(threads)
+    }
+
+    fn list_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>> {
+        let conn = self.conn.lock().unwrap();
+
+        let (query, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(id) = account_id {
+            (
+                "SELECT t.id, t.account_id, t.subject, t.snippet, t.last_message_at, t.message_count,
+                        t.sender_name, t.sender_email, t.is_unread
+                 FROM threads t
+                 INNER JOIN thread_labels tl ON t.id = tl.thread_id
+                 WHERE tl.label_id = ? AND t.account_id = ?
+                 ORDER BY tl.last_message_at DESC
+                 LIMIT ? OFFSET ?",
+                vec![
+                    Box::new(label.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(id),
+                    Box::new(limit as i64),
+                    Box::new(offset as i64),
+                ],
+            )
+        } else {
+            (
+                "SELECT t.id, t.account_id, t.subject, t.snippet, t.last_message_at, t.message_count,
+                        t.sender_name, t.sender_email, t.is_unread
+                 FROM threads t
+                 INNER JOIN thread_labels tl ON t.id = tl.thread_id
+                 WHERE tl.label_id = ?
+                 ORDER BY tl.last_message_at DESC
+                 LIMIT ? OFFSET ?",
+                vec![
+                    Box::new(label.to_string()) as Box<dyn rusqlite::ToSql>,
+                    Box::new(limit as i64),
+                    Box::new(offset as i64),
+                ],
+            )
+        };
+
+        let mut stmt = conn.prepare(query)?;
+
+        let threads = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                let last_message_at_str: String = row.get(4)?;
+                let last_message_at = chrono::DateTime::parse_from_rfc3339(&last_message_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                Ok(Thread {
+                    id: ThreadId::new(row.get::<_, String>(0)?),
+                    account_id: row.get(1)?,
+                    subject: row.get(2)?,
+                    snippet: row.get(3)?,
+                    last_message_at,
+                    message_count: row.get::<_, i64>(5)? as usize,
+                    sender_name: row.get(6)?,
+                    sender_email: row.get(7)?,
+                    is_unread: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(threads)
+    }
+
+    fn count_threads_for_account(&self, account_id: Option<i64>) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = if let Some(id) = account_id {
+            conn.query_row(
+                "SELECT COUNT(*) FROM threads WHERE account_id = ?",
+                [id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?
+        };
+
+        Ok(count as usize)
+    }
+
+    fn count_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = if let Some(id) = account_id {
+            conn.query_row(
+                "SELECT COUNT(*) FROM thread_labels tl
+                 INNER JOIN threads t ON tl.thread_id = t.id
+                 WHERE tl.label_id = ? AND t.account_id = ?",
+                params![label, id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM thread_labels WHERE label_id = ?",
+                [label],
+                |row| row.get(0),
+            )?
+        };
+
+        Ok(count as usize)
+    }
+
+    fn count_unread_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+
+        let count: i64 = if let Some(id) = account_id {
+            conn.query_row(
+                "SELECT COUNT(*) FROM thread_labels tl
+                 INNER JOIN threads t ON tl.thread_id = t.id
+                 WHERE tl.label_id = ? AND t.is_unread = 1 AND t.account_id = ?",
+                params![label, id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM thread_labels tl
+                 INNER JOIN threads t ON tl.thread_id = t.id
+                 WHERE tl.label_id = ? AND t.is_unread = 1",
+                [label],
+                |row| row.get(0),
+            )?
+        };
+
+        Ok(count as usize)
+    }
+
+    fn clear_account_data(&self, account_id: i64) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Delete in dependency order (keep account record)
+        tx.execute(
+            "DELETE FROM pending_message_labels WHERE message_id IN
+             (SELECT id FROM pending_messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM pending_messages WHERE account_id = ?",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM thread_labels WHERE account_id = ?",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM message_labels WHERE message_id IN
+             (SELECT id FROM messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM message_recipients WHERE message_id IN
+             (SELECT id FROM messages WHERE account_id = ?)",
+            [account_id],
+        )?;
+        tx.execute("DELETE FROM messages WHERE account_id = ?", [account_id])?;
+        tx.execute("DELETE FROM threads WHERE account_id = ?", [account_id])?;
+        tx.execute("DELETE FROM sync_state WHERE account_id = ?", [account_id])?;
+
+        tx.commit()?;
         Ok(())
     }
 }
@@ -1235,12 +1690,25 @@ mod tests {
         let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
 
+        // Register a test account so threads/messages can reference it
+        let test_account = Account {
+            id: 0, // Will be assigned by database
+            email: "test@example.com".to_string(),
+            display_name: Some("Test User".to_string()),
+            avatar_color: "#3B82F6".to_string(),
+            is_primary: true,
+            added_at: Utc::now(),
+            token_data: None,
+        };
+        store.register_account(test_account).unwrap();
+
         (store, dir)
     }
 
     fn make_test_thread(id: &str, subject: &str) -> Thread {
         Thread::new(
             ThreadId::new(id),
+            1, // account_id
             subject.to_string(),
             "Test snippet".to_string(),
             Utc::now(),
@@ -1253,6 +1721,7 @@ mod tests {
 
     fn make_test_message(id: &str, thread_id: &str) -> Message {
         Message::builder(MessageId::new(id), ThreadId::new(thread_id))
+            .account_id(1)
             .from(EmailAddress::new("test@example.com"))
             .subject("Test")
             .body_preview("Test preview")
@@ -1355,33 +1824,41 @@ mod tests {
     fn test_sync_state() {
         let (store, _dir) = create_test_store();
 
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+        assert!(store.get_sync_state(1).unwrap().is_none());
 
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         store.save_sync_state(state).unwrap();
 
-        let retrieved = store.get_sync_state("user@gmail.com").unwrap().unwrap();
+        let retrieved = store.get_sync_state(1).unwrap().unwrap();
         assert_eq!(retrieved.history_id, "12345");
 
-        store.delete_sync_state("user@gmail.com").unwrap();
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+        store.delete_sync_state(1).unwrap();
+        assert!(store.get_sync_state(1).unwrap().is_none());
     }
 
     #[test]
     fn test_pending_messages() {
         let (store, _dir) = create_test_store();
+        let account_id = 1;
 
         let id = MessageId::new("p1");
         let data = b"raw gmail json";
         let labels = vec!["INBOX".to_string()];
 
-        store.store_pending_message(&id, data, labels).unwrap();
+        store
+            .store_pending_message(&id, account_id, data, labels)
+            .unwrap();
 
         assert!(store.has_pending_message(&id).unwrap());
-        assert_eq!(store.count_pending_messages(None).unwrap(), 1);
-        assert_eq!(store.count_pending_messages(Some("INBOX")).unwrap(), 1);
+        assert_eq!(store.count_pending_messages(account_id, None).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_pending_messages(account_id, Some("INBOX"))
+                .unwrap(),
+            1
+        );
 
-        let pending = store.get_pending_messages(None, 10).unwrap();
+        let pending = store.get_pending_messages(account_id, None, 10).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].data, data);
 
@@ -1447,6 +1924,7 @@ mod tests {
         // Add 3 messages to the same thread
         for i in 1..=3 {
             let msg = Message::builder(MessageId::new(format!("m{}", i)), ThreadId::new("t1"))
+                .account_id(1)
                 .from(EmailAddress::new(format!("sender{}@example.com", i)))
                 .subject(format!("Message {}", i))
                 .body_preview(format!("Preview {}", i))

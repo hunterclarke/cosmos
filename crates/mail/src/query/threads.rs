@@ -12,6 +12,8 @@ use crate::storage::MailStore;
 pub struct ThreadSummary {
     /// Thread ID
     pub id: ThreadId,
+    /// Account ID this thread belongs to
+    pub account_id: i64,
     /// Subject line
     pub subject: String,
     /// Preview snippet
@@ -32,6 +34,7 @@ impl From<Thread> for ThreadSummary {
     fn from(thread: Thread) -> Self {
         Self {
             id: thread.id,
+            account_id: thread.account_id,
             subject: thread.subject,
             snippet: thread.snippet,
             last_message_at: thread.last_message_at,
@@ -125,6 +128,7 @@ mod tests {
         for i in 0..5 {
             let thread = Thread::new(
                 ThreadId::new(format!("t{}", i)),
+                1, // account_id
                 format!("Thread {}", i),
                 format!("Snippet {}", i),
                 Utc::now() - chrono::Duration::hours(i as i64),

@@ -3,6 +3,10 @@
 //! Implements OAuth2 authorization code flow for Gmail API authentication.
 //! Uses a local HTTP server to receive the OAuth callback.
 //! Uses synchronous HTTP (ureq) to be executor-agnostic.
+//!
+//! Supports two storage modes:
+//! - Database: tokens stored in SQLite as JSON strings
+//! - File: tokens stored in JSON files (legacy, for testing)
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -10,20 +14,29 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::RwLock;
+
+/// Token storage mode
+enum TokenStorage {
+    /// Store tokens in a file (legacy mode)
+    File(PathBuf),
+    /// Store tokens in memory (for database mode - caller handles persistence)
+    Memory(RwLock<Option<String>>),
+}
 
 /// OAuth2 configuration and token management for Gmail
 pub struct GmailAuth {
     client_id: String,
     client_secret: String,
-    token_path: PathBuf,
+    storage: TokenStorage,
 }
 
-/// Stored token data
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredToken {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_at: Option<i64>,
+/// Stored token data (public for database serialization)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredToken {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<i64>,
 }
 
 /// Token response from Google
@@ -48,7 +61,7 @@ impl GmailAuth {
     const PORT_RANGE_START: u16 = 8080;
     const PORT_RANGE_END: u16 = 8090;
 
-    /// Create a new GmailAuth instance
+    /// Create a new GmailAuth instance with default token path (file storage)
     ///
     /// # Arguments
     /// * `client_id` - OAuth2 client ID from Google Cloud Console
@@ -59,13 +72,87 @@ impl GmailAuth {
         Ok(Self {
             client_id,
             client_secret,
-            token_path,
+            storage: TokenStorage::File(token_path),
         })
+    }
+
+    /// Create a GmailAuth instance for a specific account (file storage)
+    ///
+    /// Uses a per-account token file based on the email address.
+    /// Token path: `~/.config/cosmos/gmail-tokens-{sanitized_email}.json`
+    ///
+    /// # Arguments
+    /// * `client_id` - OAuth2 client ID from Google Cloud Console
+    /// * `client_secret` - OAuth2 client secret from Google Cloud Console
+    /// * `email` - Email address of the account
+    pub fn for_account(client_id: String, client_secret: String, email: &str) -> Result<Self> {
+        let token_path = Self::account_token_path(email)?;
+
+        Ok(Self {
+            client_id,
+            client_secret,
+            storage: TokenStorage::File(token_path),
+        })
+    }
+
+    /// Create a GmailAuth instance with in-memory token storage (for database mode)
+    ///
+    /// The token_data should be a JSON-serialized StoredToken, or None for new accounts.
+    /// After authentication or token refresh, call `get_token_data()` to get the
+    /// updated token JSON for saving to the database.
+    ///
+    /// # Arguments
+    /// * `client_id` - OAuth2 client ID from Google Cloud Console
+    /// * `client_secret` - OAuth2 client secret from Google Cloud Console
+    /// * `token_data` - Optional JSON-serialized token data from database
+    pub fn with_token_data(
+        client_id: String,
+        client_secret: String,
+        token_data: Option<String>,
+    ) -> Self {
+        Self {
+            client_id,
+            client_secret,
+            storage: TokenStorage::Memory(RwLock::new(token_data)),
+        }
+    }
+
+    /// Get the current token data as a JSON string for database storage
+    ///
+    /// Returns None if no token has been obtained yet.
+    pub fn get_token_data(&self) -> Option<String> {
+        match &self.storage {
+            TokenStorage::File(path) => fs::read_to_string(path).ok(),
+            TokenStorage::Memory(data) => data.read().unwrap().clone(),
+        }
+    }
+
+    /// Get the token storage path for a specific account
+    ///
+    /// Sanitizes the email to create a valid filename:
+    /// - `@` becomes `-at-`
+    /// - `.` becomes `-`
+    /// - Lowercase
+    pub fn account_token_path(email: &str) -> Result<PathBuf> {
+        let sanitized = email
+            .replace('@', "-at-")
+            .replace('.', "-")
+            .to_lowercase();
+        config::config_path(&format!("gmail-tokens-{}.json", sanitized))
+            .context("Could not determine config directory")
     }
 
     /// Get the default token storage path (~/.config/cosmos/gmail-tokens.json)
     fn default_token_path() -> Result<PathBuf> {
         config::config_path("gmail-tokens.json").context("Could not determine config directory")
+    }
+
+    /// Get the token path being used by this instance (only for file storage mode)
+    pub fn token_path(&self) -> Option<&PathBuf> {
+        match &self.storage {
+            TokenStorage::File(path) => Some(path),
+            TokenStorage::Memory(_) => None,
+        }
     }
 
     /// Get a valid access token, refreshing or re-authenticating as needed
@@ -249,20 +336,22 @@ impl GmailAuth {
         Ok(token)
     }
 
-    /// Load stored token from disk
+    /// Load stored token
     fn load_token(&self) -> Result<StoredToken> {
-        let content = fs::read_to_string(&self.token_path)?;
+        let content = match &self.storage {
+            TokenStorage::File(path) => fs::read_to_string(path)?,
+            TokenStorage::Memory(data) => data
+                .read()
+                .unwrap()
+                .clone()
+                .context("No token data in memory")?,
+        };
         let token: StoredToken = serde_json::from_str(&content)?;
         Ok(token)
     }
 
-    /// Save token response to disk
+    /// Save token response
     fn save_token_response(&self, token: &TokenResponse) -> Result<()> {
-        // Ensure directory exists
-        if let Some(parent) = self.token_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let stored = StoredToken {
             access_token: token.access_token.clone(),
             refresh_token: token.refresh_token.clone(),
@@ -272,7 +361,19 @@ impl GmailAuth {
         };
 
         let content = serde_json::to_string_pretty(&stored)?;
-        fs::write(&self.token_path, content)?;
+
+        match &self.storage {
+            TokenStorage::File(path) => {
+                // Ensure directory exists
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(path, content)?;
+            }
+            TokenStorage::Memory(data) => {
+                *data.write().unwrap() = Some(content);
+            }
+        }
         Ok(())
     }
 
@@ -295,9 +396,56 @@ impl GmailAuth {
 
     /// Clear stored tokens (logout)
     pub fn logout(&self) -> Result<()> {
-        if self.token_path.exists() {
-            fs::remove_file(&self.token_path)?;
+        match &self.storage {
+            TokenStorage::File(path) => {
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            TokenStorage::Memory(data) => {
+                *data.write().unwrap() = None;
+            }
         }
         Ok(())
+    }
+
+    /// Discover all account emails with saved token files
+    ///
+    /// Scans the config directory for `gmail-tokens-*.json` files and
+    /// extracts the email addresses from the filenames.
+    ///
+    /// Returns a list of email addresses that have token files.
+    pub fn discover_account_emails() -> Result<Vec<String>> {
+        let config_dir =
+            config::config_dir().context("Could not determine config directory")?;
+
+        let mut emails = Vec::new();
+
+        // Read directory entries
+        let entries = match fs::read_dir(&config_dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(emails), // Directory doesn't exist, no accounts
+        };
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+
+            // Match pattern: gmail-tokens-{sanitized_email}.json
+            if let Some(rest) = name.strip_prefix("gmail-tokens-") {
+                if let Some(sanitized) = rest.strip_suffix(".json") {
+                    // Convert sanitized email back to real email
+                    // -at- -> @, - -> .
+                    // Note: This is a best-effort reverse of the sanitization
+                    let email = sanitized
+                        .replace("-at-", "@")
+                        .replace('-', ".");
+
+                    emails.push(email);
+                }
+            }
+        }
+
+        Ok(emails)
     }
 }

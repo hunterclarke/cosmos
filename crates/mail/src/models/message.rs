@@ -100,6 +100,8 @@ pub struct Message {
     pub id: MessageId,
     /// ID of the thread this message belongs to
     pub thread_id: ThreadId,
+    /// Account ID this message belongs to
+    pub account_id: i64,
     /// Sender's email address
     pub from: EmailAddress,
     /// Recipients (To field)
@@ -135,6 +137,7 @@ impl Message {
 pub struct MessageBuilder {
     id: MessageId,
     thread_id: ThreadId,
+    account_id: i64,
     from: Option<EmailAddress>,
     to: Vec<EmailAddress>,
     cc: Vec<EmailAddress>,
@@ -152,6 +155,7 @@ impl MessageBuilder {
         Self {
             id,
             thread_id,
+            account_id: 0,
             from: None,
             to: Vec::new(),
             cc: Vec::new(),
@@ -163,6 +167,11 @@ impl MessageBuilder {
             internal_date: 0,
             label_ids: Vec::new(),
         }
+    }
+
+    pub fn account_id(mut self, account_id: i64) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     pub fn from(mut self, from: EmailAddress) -> Self {
@@ -219,6 +228,7 @@ impl MessageBuilder {
         Message {
             id: self.id,
             thread_id: self.thread_id,
+            account_id: self.account_id,
             from: self
                 .from
                 .unwrap_or_else(|| EmailAddress::new("unknown@unknown.com")),

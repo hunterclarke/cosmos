@@ -9,7 +9,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 use super::traits::{MailStore, MessageBody, MessageMetadata, PendingMessage};
-use crate::models::{Message, MessageId, SyncState, Thread, ThreadId};
+use crate::models::{Account, Message, MessageId, SyncState, Thread, ThreadId};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// In-memory implementation of MailStore
 ///
@@ -26,7 +27,7 @@ pub struct InMemoryMailStore {
     messages: RwLock<HashMap<String, Message>>,
     thread_messages: RwLock<HashMap<String, HashSet<String>>>,
     /// Sync state per account (Phase 2)
-    sync_states: RwLock<HashMap<String, SyncState>>,
+    sync_states: RwLock<HashMap<i64, SyncState>>,
     /// Sorted index: label -> set of (Reverse<timestamp_millis>, thread_id)
     /// Using Reverse for descending order (newest first)
     label_thread_index: RwLock<HashMap<String, BTreeSet<(Reverse<i64>, String)>>>,
@@ -35,6 +36,10 @@ pub struct InMemoryMailStore {
     thread_label_ts: RwLock<HashMap<(String, String), i64>>,
     /// Pending messages for deferred processing (Phase 4)
     pending_messages: RwLock<HashMap<String, PendingMessageData>>,
+    /// Registered accounts (Multi-Account Support)
+    accounts: RwLock<HashMap<i64, Account>>,
+    /// Auto-increment counter for account IDs
+    next_account_id: AtomicI64,
 }
 
 impl InMemoryMailStore {
@@ -48,6 +53,8 @@ impl InMemoryMailStore {
             label_thread_index: RwLock::new(HashMap::new()),
             thread_label_ts: RwLock::new(HashMap::new()),
             pending_messages: RwLock::new(HashMap::new()),
+            accounts: RwLock::new(HashMap::new()),
+            next_account_id: AtomicI64::new(1),
         }
     }
 
@@ -289,25 +296,26 @@ impl MailStore for InMemoryMailStore {
         self.label_thread_index.write().unwrap().clear();
         self.thread_label_ts.write().unwrap().clear();
         self.pending_messages.write().unwrap().clear();
+        self.accounts.write().unwrap().clear();
         Ok(())
     }
 
     // === Phase 2: Sync State Methods ===
 
-    fn get_sync_state(&self, account_id: &str) -> Result<Option<SyncState>> {
+    fn get_sync_state(&self, account_id: i64) -> Result<Option<SyncState>> {
         let states = self.sync_states.read().unwrap();
-        Ok(states.get(account_id).cloned())
+        Ok(states.get(&account_id).cloned())
     }
 
     fn save_sync_state(&self, state: SyncState) -> Result<()> {
         let mut states = self.sync_states.write().unwrap();
-        states.insert(state.account_id.clone(), state);
+        states.insert(state.account_id, state);
         Ok(())
     }
 
-    fn delete_sync_state(&self, account_id: &str) -> Result<()> {
+    fn delete_sync_state(&self, account_id: i64) -> Result<()> {
         let mut states = self.sync_states.write().unwrap();
-        states.remove(account_id);
+        states.remove(&account_id);
         Ok(())
     }
 
@@ -474,6 +482,7 @@ impl MailStore for InMemoryMailStore {
     fn store_pending_message(
         &self,
         id: &MessageId,
+        _account_id: i64,
         data: &[u8],
         label_ids: Vec<String>,
     ) -> Result<()> {
@@ -494,6 +503,7 @@ impl MailStore for InMemoryMailStore {
 
     fn get_pending_messages(
         &self,
+        _account_id: i64,
         label: Option<&str>,
         limit: usize,
     ) -> Result<Vec<PendingMessage>> {
@@ -544,7 +554,7 @@ impl MailStore for InMemoryMailStore {
         Ok(())
     }
 
-    fn count_pending_messages(&self, label: Option<&str>) -> Result<usize> {
+    fn count_pending_messages(&self, _account_id: i64, label: Option<&str>) -> Result<usize> {
         let pending = self.pending_messages.read().unwrap();
 
         if label.is_none() {
@@ -563,6 +573,255 @@ impl MailStore for InMemoryMailStore {
         self.pending_messages.write().unwrap().clear();
         Ok(())
     }
+
+    // === Multi-Account Support Methods ===
+
+    fn register_account(&self, account: Account) -> Result<Account> {
+        let id = self.next_account_id.fetch_add(1, Ordering::SeqCst);
+        let account_with_id = Account {
+            id,
+            email: account.email,
+            display_name: account.display_name,
+            avatar_color: account.avatar_color,
+            is_primary: account.is_primary,
+            added_at: account.added_at,
+            token_data: account.token_data,
+        };
+        self.accounts
+            .write()
+            .unwrap()
+            .insert(id, account_with_id.clone());
+        Ok(account_with_id)
+    }
+
+    fn get_account(&self, account_id: i64) -> Result<Option<Account>> {
+        let accounts = self.accounts.read().unwrap();
+        Ok(accounts.get(&account_id).cloned())
+    }
+
+    fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
+        let accounts = self.accounts.read().unwrap();
+        Ok(accounts.values().find(|a| a.email == email).cloned())
+    }
+
+    fn list_accounts(&self) -> Result<Vec<Account>> {
+        let accounts = self.accounts.read().unwrap();
+        let mut list: Vec<_> = accounts.values().cloned().collect();
+        // Sort: primary first, then by added_at
+        list.sort_by(|a, b| {
+            b.is_primary
+                .cmp(&a.is_primary)
+                .then(a.added_at.cmp(&b.added_at))
+        });
+        Ok(list)
+    }
+
+    fn delete_account(&self, account_id: i64) -> Result<()> {
+        // Clear account data first
+        self.clear_account_data(account_id)?;
+
+        // Then remove the account itself
+        self.accounts.write().unwrap().remove(&account_id);
+        Ok(())
+    }
+
+    fn update_account_token(&self, account_id: i64, token_data: Option<String>) -> Result<()> {
+        let mut accounts = self.accounts.write().unwrap();
+        if let Some(account) = accounts.get_mut(&account_id) {
+            account.token_data = token_data;
+        }
+        Ok(())
+    }
+
+    fn list_threads_for_account(
+        &self,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>> {
+        let threads = self.threads.read().unwrap();
+        let mut thread_list: Vec<_> = threads
+            .values()
+            .filter(|t| account_id.is_none() || Some(t.account_id) == account_id)
+            .cloned()
+            .collect();
+
+        // Sort by last_message_at descending
+        thread_list.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+
+        // Apply pagination
+        let result = thread_list.into_iter().skip(offset).take(limit).collect();
+
+        Ok(result)
+    }
+
+    fn list_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Thread>> {
+        let index = self.label_thread_index.read().unwrap();
+        let threads = self.threads.read().unwrap();
+
+        let Some(label_set) = index.get(label) else {
+            return Ok(Vec::new());
+        };
+
+        // BTreeSet is already sorted by (Reverse<timestamp>, thread_id)
+        let result: Vec<Thread> = label_set
+            .iter()
+            .filter_map(|(_, thread_id)| threads.get(thread_id).cloned())
+            .filter(|t| account_id.is_none() || Some(t.account_id) == account_id)
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        Ok(result)
+    }
+
+    fn count_threads_for_account(&self, account_id: Option<i64>) -> Result<usize> {
+        let threads = self.threads.read().unwrap();
+        let count = if let Some(id) = account_id {
+            threads.values().filter(|t| t.account_id == id).count()
+        } else {
+            threads.len()
+        };
+        Ok(count)
+    }
+
+    fn count_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize> {
+        let index = self.label_thread_index.read().unwrap();
+
+        if let Some(id) = account_id {
+            let threads = self.threads.read().unwrap();
+            let Some(label_set) = index.get(label) else {
+                return Ok(0);
+            };
+            let count = label_set
+                .iter()
+                .filter(|(_, thread_id)| {
+                    threads
+                        .get(thread_id)
+                        .map(|t| t.account_id == id)
+                        .unwrap_or(false)
+                })
+                .count();
+            Ok(count)
+        } else {
+            Ok(index.get(label).map(|set| set.len()).unwrap_or(0))
+        }
+    }
+
+    fn count_unread_threads_by_label_for_account(
+        &self,
+        label: &str,
+        account_id: Option<i64>,
+    ) -> Result<usize> {
+        let index = self.label_thread_index.read().unwrap();
+        let threads = self.threads.read().unwrap();
+
+        let Some(label_set) = index.get(label) else {
+            return Ok(0);
+        };
+
+        let count = label_set
+            .iter()
+            .filter(|(_, thread_id)| {
+                threads
+                    .get(thread_id)
+                    .map(|t| {
+                        t.is_unread && (account_id.is_none() || Some(t.account_id) == account_id)
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+
+        Ok(count)
+    }
+
+    fn clear_account_data(&self, account_id: i64) -> Result<()> {
+        // Collect IDs to delete
+        let thread_ids_to_delete: Vec<String> = {
+            let threads = self.threads.read().unwrap();
+            threads
+                .iter()
+                .filter(|(_, t)| t.account_id == account_id)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let message_ids_to_delete: Vec<String> = {
+            let thread_messages = self.thread_messages.read().unwrap();
+            thread_ids_to_delete
+                .iter()
+                .flat_map(|tid| thread_messages.get(tid).cloned().unwrap_or_default())
+                .collect()
+        };
+
+        // Delete messages
+        {
+            let mut messages = self.messages.write().unwrap();
+            for id in &message_ids_to_delete {
+                messages.remove(id);
+            }
+        }
+
+        // Delete thread_messages entries
+        {
+            let mut thread_messages = self.thread_messages.write().unwrap();
+            for tid in &thread_ids_to_delete {
+                thread_messages.remove(tid);
+            }
+        }
+
+        // Delete threads
+        {
+            let mut threads = self.threads.write().unwrap();
+            for tid in &thread_ids_to_delete {
+                threads.remove(tid);
+            }
+        }
+
+        // Clean up label indices
+        {
+            let mut index = self.label_thread_index.write().unwrap();
+            let mut reverse = self.thread_label_ts.write().unwrap();
+
+            for tid in &thread_ids_to_delete {
+                // Remove all label entries for this thread
+                let keys_to_remove: Vec<_> = reverse
+                    .keys()
+                    .filter(|(t, _)| t == tid)
+                    .cloned()
+                    .collect();
+
+                for key in keys_to_remove {
+                    let (thread_id, label) = &key;
+                    if let Some(&ts) = reverse.get(&key) {
+                        if let Some(set) = index.get_mut(label) {
+                            set.remove(&(Reverse(ts), thread_id.clone()));
+                        }
+                    }
+                    reverse.remove(&key);
+                }
+            }
+        }
+
+        // Note: In-memory store doesn't track account_id on pending messages
+        // For a complete implementation, we'd need to add account_id to PendingMessageData
+        // For now, pending messages are not cleared per-account
+
+        // Delete sync state for this account
+        self.sync_states.write().unwrap().remove(&account_id);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -574,6 +833,7 @@ mod tests {
     fn make_test_thread(id: &str, subject: &str) -> Thread {
         Thread::new(
             ThreadId::new(id),
+            1, // account_id
             subject.to_string(),
             "Test snippet".to_string(),
             Utc::now(),
@@ -708,29 +968,29 @@ mod tests {
         let store = InMemoryMailStore::new();
 
         // Initially no sync state
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+        assert!(store.get_sync_state(1).unwrap().is_none());
 
         // Save sync state
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         store.save_sync_state(state).unwrap();
 
         // Retrieve it
-        let retrieved = store.get_sync_state("user@gmail.com").unwrap();
+        let retrieved = store.get_sync_state(1).unwrap();
         assert!(retrieved.is_some());
         let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.account_id, "user@gmail.com");
+        assert_eq!(retrieved.account_id, 1);
         assert_eq!(retrieved.history_id, "12345");
 
         // Update it
-        let updated = SyncState::new("user@gmail.com", "67890");
+        let updated = SyncState::new(1, "67890");
         store.save_sync_state(updated).unwrap();
 
-        let retrieved = store.get_sync_state("user@gmail.com").unwrap().unwrap();
+        let retrieved = store.get_sync_state(1).unwrap().unwrap();
         assert_eq!(retrieved.history_id, "67890");
 
         // Delete it
-        store.delete_sync_state("user@gmail.com").unwrap();
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_none());
+        store.delete_sync_state(1).unwrap();
+        assert!(store.get_sync_state(1).unwrap().is_none());
     }
 
     #[test]
@@ -752,11 +1012,11 @@ mod tests {
         store.upsert_thread(make_test_thread("t1", "Test")).unwrap();
         store.upsert_message(make_test_message("m1", "t1")).unwrap();
         store
-            .save_sync_state(SyncState::new("user@gmail.com", "12345"))
+            .save_sync_state(SyncState::new(1, "12345"))
             .unwrap();
 
         assert_eq!(store.count_threads().unwrap(), 1);
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_some());
+        assert!(store.get_sync_state(1).unwrap().is_some());
 
         // Clear mail data only
         store.clear_mail_data().unwrap();
@@ -766,6 +1026,6 @@ mod tests {
         assert!(!store.has_message(&MessageId::new("m1")).unwrap());
 
         // But sync state is preserved
-        assert!(store.get_sync_state("user@gmail.com").unwrap().is_some());
+        assert!(store.get_sync_state(1).unwrap().is_some());
     }
 }
