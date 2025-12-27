@@ -8,11 +8,15 @@
 //! - Query API for UI consumption
 //! - Action handlers for mutations (archive, star, read/unread)
 //!
-//! This crate has zero UI dependencies and is designed to be UniFFI-ready
-//! for future mobile support.
+//! This crate has zero UI dependencies and provides UniFFI bindings
+//! for Swift/Kotlin via the `ffi` module.
+
+// UniFFI scaffolding - generates the FFI glue code
+uniffi::setup_scaffolding!();
 
 pub mod actions;
 pub mod config;
+pub mod ffi;
 pub mod gmail;
 pub mod models;
 pub mod query;

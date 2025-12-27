@@ -1,6 +1,9 @@
 [workspace]
 members = [
-    "crates/apps/orion", "crates/config",
+    "crates/apps/orion",
+    "crates/config",
     "crates/mail",
+    "crates/mail-ffi",
 ]
+default-members = ["crates/apps/orion"]
 resolver = "3"

@@ -1,0 +1,91 @@
+#!/bin/bash
+#
+# Run the SwiftUI Orion app on iOS Simulator
+#
+# Prerequisites:
+#   - Xcode installed
+#   - iOS Simulator available
+#   - Rust toolchain with Apple targets
+#
+# Usage:
+#   ./script/run-ios [simulator-name]
+#
+# Examples:
+#   ./script/run-ios                    # Uses iPhone 17 simulator
+#   ./script/run-ios "iPhone 16 Pro"    # Specific simulator
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SWIFT_PROJECT="$PROJECT_DIR/apple/Orion"
+XCFRAMEWORK_DIR="$SWIFT_PROJECT/MailFFI.xcframework"
+XCODEPROJ="$SWIFT_PROJECT/Orion.xcodeproj"
+SIMULATOR_NAME="${1:-iPhone 17}"
+
+cd "$PROJECT_DIR"
+
+# Always build XCFramework to ensure dependencies are up-to-date
+echo "Building XCFramework..."
+"$SCRIPT_DIR/build-xcframework"
+
+# Check if Xcode project exists
+if [ ! -d "$XCODEPROJ" ]; then
+    echo "Error: Xcode project not found at $XCODEPROJ"
+    exit 1
+fi
+
+echo "Running SwiftUI Orion on iOS Simulator..."
+echo "Simulator: $SIMULATOR_NAME"
+echo ""
+
+# Check for Xcode
+if ! command -v xcrun &> /dev/null; then
+    echo "Error: Xcode command line tools not found."
+    exit 1
+fi
+
+# Find the simulator UDID
+SIMULATOR_UDID=$(xcrun simctl list devices available | grep "$SIMULATOR_NAME" | head -1 | grep -oE '[0-9A-F-]{36}')
+
+if [ -z "$SIMULATOR_UDID" ]; then
+    echo "Error: Simulator '$SIMULATOR_NAME' not found."
+    echo ""
+    echo "Available simulators:"
+    xcrun simctl list devices available | grep -E "iPhone|iPad"
+    exit 1
+fi
+
+echo "Using simulator: $SIMULATOR_NAME ($SIMULATOR_UDID)"
+echo ""
+
+# Boot the simulator if needed
+xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
+
+# Open Simulator app
+open -a Simulator
+
+# Build the app for simulator
+echo "Building for iOS Simulator..."
+xcodebuild -project "$XCODEPROJ" \
+    -scheme "Orion" \
+    -configuration Debug \
+    -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+    build
+
+# Find the built app
+BUILD_DIR=$(xcodebuild -project "$XCODEPROJ" -scheme "Orion" -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" -showBuildSettings 2>/dev/null | grep -m1 "BUILT_PRODUCTS_DIR" | awk '{print $3}')
+APP_PATH="$BUILD_DIR/Orion.app"
+
+if [ ! -d "$APP_PATH" ]; then
+    echo "Error: Could not find built app at $APP_PATH"
+    exit 1
+fi
+
+# Install and launch on simulator
+echo ""
+echo "Installing on simulator..."
+xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
+
+echo "Launching Orion..."
+xcrun simctl launch "$SIMULATOR_UDID" com.cosmos.Orion
