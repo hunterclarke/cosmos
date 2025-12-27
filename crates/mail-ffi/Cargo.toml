@@ -1,0 +1,25 @@
+[package]
+name = "mail-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "UniFFI bindings for the mail crate - generates Swift/Kotlin bindings"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+name = "mail_ffi"
+
+[dependencies]
+mail = { path = "../mail" }
+uniffi = { version = "0.30" }
+
+[dev-dependencies]
+# CLI feature needed for uniffi-bindgen binary
+uniffi = { version = "0.30", features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]

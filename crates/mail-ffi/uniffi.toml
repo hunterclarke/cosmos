@@ -1,0 +1,7 @@
+[bindings.swift]
+generate_module_map = true
+module_name = "mail_ffi"
+
+# External types from the mail crate
+[bindings.swift.external_packages.mail]
+crate_name = "mail"

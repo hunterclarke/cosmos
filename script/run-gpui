@@ -1,0 +1,21 @@
+#!/bin/bash
+#
+# Run the GPUI Orion app on macOS
+#
+# Usage:
+#   ./script/run-macos [--release]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$PROJECT_DIR"
+
+if [ "$1" = "--release" ]; then
+    echo "Running Orion (GPUI) in release mode..."
+    cargo run -p orion --release
+else
+    echo "Running Orion (GPUI) in debug mode..."
+    cargo run -p orion
+fi

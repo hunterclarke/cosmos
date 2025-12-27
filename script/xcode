@@ -1,0 +1,19 @@
+#!/bin/bash
+#
+# Open the Orion Xcode project
+#
+# Usage:
+#   ./script/xcode
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+XCODEPROJ="$PROJECT_DIR/apple/Orion/Orion.xcodeproj"
+
+if [ ! -d "$XCODEPROJ" ]; then
+    echo "Error: Xcode project not found at $XCODEPROJ"
+    exit 1
+fi
+
+open "$XCODEPROJ"

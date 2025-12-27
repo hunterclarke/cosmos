@@ -1,0 +1,56 @@
+#!/bin/bash
+#
+# Run the SwiftUI Orion app on macOS
+#
+# Prerequisites:
+#   - Xcode installed
+#   - Rust toolchain with Apple targets
+#
+# Usage:
+#   ./script/run-macos
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SWIFT_PROJECT="$PROJECT_DIR/apple/Orion"
+XCFRAMEWORK_DIR="$SWIFT_PROJECT/MailFFI.xcframework"
+XCODEPROJ="$SWIFT_PROJECT/Orion.xcodeproj"
+
+cd "$PROJECT_DIR"
+
+# Always build XCFramework to ensure dependencies are up-to-date
+echo "Building XCFramework..."
+"$SCRIPT_DIR/build-xcframework"
+
+# Check if Xcode project exists
+if [ ! -d "$XCODEPROJ" ]; then
+    echo "Error: Xcode project not found at $XCODEPROJ"
+    exit 1
+fi
+
+echo "Building and running SwiftUI Orion on macOS..."
+echo ""
+
+# Build the app
+xcodebuild -project "$XCODEPROJ" \
+    -scheme "Orion" \
+    -configuration Debug \
+    -destination "platform=macOS" \
+    build
+
+# Find and run the built app
+BUILD_DIR=$(xcodebuild -project "$XCODEPROJ" -scheme "Orion" -showBuildSettings 2>/dev/null | grep -m1 "BUILT_PRODUCTS_DIR" | awk '{print $3}')
+APP_PATH="$BUILD_DIR/Orion.app"
+
+if [ -d "$APP_PATH" ]; then
+    echo ""
+    echo "Launching Orion (logs will stream to this terminal)..."
+    echo "Press Ctrl+C to stop"
+    echo ""
+    # Run the executable directly to pipe logs to the shell
+    "$APP_PATH/Contents/MacOS/Orion"
+else
+    echo "Error: Could not find built app at $APP_PATH"
+    exit 1
+fi

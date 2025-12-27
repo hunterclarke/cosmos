@@ -158,25 +158,49 @@ impl GmailAuth {
     /// Get a valid access token, refreshing or re-authenticating as needed
     pub fn get_access_token(&self) -> Result<String> {
         // Try to load existing token
-        if let Ok(token) = self.load_token() {
-            // Check if token is still valid (with 5 minute buffer)
-            if let Some(expires_at) = token.expires_at {
-                let now = chrono::Utc::now().timestamp();
-                if expires_at > now + 300 {
-                    return Ok(token.access_token);
+        match self.load_token() {
+            Ok(token) => {
+                log::debug!("Token loaded, expires_at: {:?}", token.expires_at);
+                // Check if token is still valid (with 5 minute buffer)
+                if let Some(expires_at) = token.expires_at {
+                    let now = chrono::Utc::now().timestamp();
+                    log::debug!("Token expires_at={}, now={}, diff={}", expires_at, now, expires_at - now);
+                    if expires_at > now + 300 {
+                        log::debug!("Token is valid, returning access token");
+                        return Ok(token.access_token);
+                    }
+                    log::debug!("Token expired or expiring soon, attempting refresh");
+                }
+
+                // Try to refresh the token
+                if let Some(ref refresh_token) = token.refresh_token {
+                    log::debug!("Attempting token refresh");
+                    match self.refresh_access_token(refresh_token) {
+                        Ok(new_token) => {
+                            self.save_token_response(&new_token)?;
+                            log::debug!("Token refreshed successfully");
+                            return Ok(new_token.access_token);
+                        }
+                        Err(e) => {
+                            log::warn!("Token refresh failed: {}", e);
+                        }
+                    }
+                } else {
+                    log::warn!("No refresh token available");
                 }
             }
-
-            // Try to refresh the token
-            if let Some(refresh_token) = token.refresh_token
-                && let Ok(new_token) = self.refresh_access_token(&refresh_token)
-            {
-                self.save_token_response(&new_token)?;
-                return Ok(new_token.access_token);
+            Err(e) => {
+                log::debug!("Failed to load token: {}", e);
             }
         }
 
-        // Need to authenticate from scratch
+        // For in-memory storage (FFI/mobile), we cannot do interactive auth
+        // Return an error so the caller can re-authenticate through the native flow
+        if matches!(&self.storage, TokenStorage::Memory(_)) {
+            anyhow::bail!("Token expired or invalid. Please re-authenticate through the app.");
+        }
+
+        // Need to authenticate from scratch (only for file-based desktop auth)
         let token = self.authorization_code_auth()?;
         self.save_token_response(&token)?;
         Ok(token.access_token)
@@ -197,21 +221,21 @@ impl GmailAuth {
             urlencoding::encode(Self::GMAIL_MODIFY_SCOPE),
         );
 
-        println!("\n=== Gmail Authentication Required ===");
-        println!("Opening browser for authentication...");
-        println!("If the browser doesn't open, visit: {}", auth_url);
+        log::info!("=== Gmail Authentication Required ===");
+        log::info!("Opening browser for authentication...");
+        log::info!("If the browser doesn't open, visit: {}", auth_url);
 
         // Open browser
         if let Err(e) = open::that(&auth_url) {
-            eprintln!("Failed to open browser: {}. Please open the URL manually.", e);
+            log::warn!("Failed to open browser: {}. Please open the URL manually.", e);
         }
 
         // Step 3: Wait for callback with authorization code
-        println!("Waiting for authorization...");
+        log::info!("Waiting for authorization...");
         let code = self.wait_for_callback(listener)?;
 
         // Step 4: Exchange code for tokens
-        println!("Exchanging authorization code for tokens...");
+        log::info!("Exchanging authorization code for tokens...");
         let mut response = ureq::post(Self::TOKEN_URL)
             .send_form([
                 ("client_id", self.client_id.as_str()),
@@ -227,7 +251,7 @@ impl GmailAuth {
             .read_json()
             .context("Failed to parse token response")?;
 
-        println!("Authentication successful!\n");
+        log::info!("Authentication successful!");
         Ok(token)
     }
 
@@ -340,13 +364,17 @@ impl GmailAuth {
     fn load_token(&self) -> Result<StoredToken> {
         let content = match &self.storage {
             TokenStorage::File(path) => fs::read_to_string(path)?,
-            TokenStorage::Memory(data) => data
-                .read()
-                .unwrap()
-                .clone()
-                .context("No token data in memory")?,
+            TokenStorage::Memory(data) => {
+                let data = data
+                    .read()
+                    .unwrap()
+                    .clone()
+                    .context("No token data in memory")?;
+                log::debug!("Loading token from memory, len={}", data.len());
+                data
+            }
         };
-        let token: StoredToken = serde_json::from_str(&content)?;
+        let token: StoredToken = serde_json::from_str(&content).context("Failed to parse token JSON")?;
         Ok(token)
     }
 

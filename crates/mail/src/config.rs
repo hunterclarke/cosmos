@@ -1,8 +1,9 @@
 //! Configuration loading for mail services
 //!
-//! Supports loading OAuth credentials from:
-//! 1. JSON file (Google Cloud Console format)
-//! 2. Environment variables (fallback)
+//! Supports loading OAuth credentials from (in order of priority):
+//! 1. Compile-time embedded credentials (for production builds)
+//! 2. JSON file (Google Cloud Console format)
+//! 3. Runtime environment variables (fallback)
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -32,17 +33,41 @@ struct InstalledCredentials {
 }
 
 impl GmailCredentials {
-    /// Load credentials from the default location (~/.config/cosmos/google-credentials.json)
-    /// Falls back to environment variables if file not found.
+    /// Load credentials using the following priority:
+    /// 1. Compile-time embedded credentials (for production builds)
+    /// 2. JSON file (~/.config/cosmos/google-credentials.json)
+    /// 3. Runtime environment variables
     pub fn load() -> Result<Self> {
-        // Try default config file first
+        // Try compile-time embedded credentials first (production builds)
+        if let Some(creds) = Self::from_compile_time() {
+            return Ok(creds);
+        }
+
+        // Try default config file
         if config::config_exists(CREDENTIALS_FILE) {
             let creds: GoogleCredentialFile = config::load_json(CREDENTIALS_FILE)?;
             return Self::from_credential_file(creds);
         }
 
-        // Fall back to environment variables
+        // Fall back to runtime environment variables
         Self::from_env()
+    }
+
+    /// Load credentials embedded at compile time via environment variables.
+    /// Build with: GOOGLE_CLIENT_ID=xxx GOOGLE_CLIENT_SECRET=yyy cargo build --release
+    pub fn from_compile_time() -> Option<Self> {
+        let client_id = option_env!("GOOGLE_CLIENT_ID")?;
+        let client_secret = option_env!("GOOGLE_CLIENT_SECRET")?;
+
+        // Only return if both are non-empty
+        if client_id.is_empty() || client_secret.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            client_id: client_id.to_string(),
+            client_secret: client_secret.to_string(),
+        })
     }
 
     /// Load credentials from a specific JSON file
@@ -90,11 +115,17 @@ impl GmailCredentials {
         config::config_path(CREDENTIALS_FILE)
     }
 
-    /// Check if credentials are available (either file or env vars)
+    /// Check if credentials are available (compile-time, file, or env vars)
     pub fn is_available() -> bool {
+        // Check compile-time embedded credentials
+        if Self::from_compile_time().is_some() {
+            return true;
+        }
+        // Check config file
         if config::config_exists(CREDENTIALS_FILE) {
             return true;
         }
+        // Check runtime environment variables
         std::env::var("GMAIL_CLIENT_ID").is_ok() && std::env::var("GMAIL_CLIENT_SECRET").is_ok()
     }
 }

@@ -31,3 +31,15 @@
 - [ ] List view paging
 - [x] Only half my main mailbox was synced
 - [x] Sync is causing too many renders. Debounce.
+
+## SwiftUI / iOS
+
+- [x] Choose minimum deployment targets (macOS 14.0, iOS 17.0)
+- [x] Wire up MailService FFI calls in MailBridge
+- [x] Implement OAuth flow in AuthService
+- [x] Wire up Add Account and Sync buttons in SidebarView
+- [x] Wire up thread actions (archive, star, read/unread)
+- [x] Cross-platform OAuth credentials (xcconfig for SwiftUI, symlink for GPUI)
+- [x] Test on iOS device/simulator
+- [x] Port sync
+- [x] Port webview

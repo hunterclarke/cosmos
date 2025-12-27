@@ -1,3 +1,22 @@
 /target
 
+# macOS
+.DS_Store
+
+# Cargo local config
+.cargo/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode user data
+xcuserdata/
+
+# Generated XCFramework (rebuild with ./script/build-xcframework)
+MailFFI.xcframework/
+
+# OAuth credentials (use secrets/*.template as reference)
 google-credentials.json
+secrets/google-credentials.json
+apple/Orion/Config/Secrets.xcconfig

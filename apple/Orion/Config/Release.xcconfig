@@ -1,0 +1,4 @@
+// Release Configuration
+// Includes secrets for OAuth credentials
+
+#include "Secrets.xcconfig"

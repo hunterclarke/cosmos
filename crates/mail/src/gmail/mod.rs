@@ -9,7 +9,7 @@ mod auth;
 mod client;
 mod normalize;
 
-pub use auth::GmailAuth;
+pub use auth::{GmailAuth, StoredToken};
 pub use client::{GmailClient, HistoryExpiredError};
 pub use normalize::normalize_message;
 

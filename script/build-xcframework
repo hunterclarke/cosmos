@@ -1,0 +1,157 @@
+#!/bin/bash
+#
+# Build XCFramework for mail-ffi
+#
+# This script builds the mail-ffi Rust library for all Apple platforms and
+# creates an XCFramework that can be used in Xcode projects.
+#
+# Usage:
+#   ./script/build-xcframework
+#
+# Output:
+#   - generated/MailFFI.xcframework
+#   - generated/swift/mail_ffi.swift
+
+set -e
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+cd "$PROJECT_DIR"
+
+echo "Building mail-ffi XCFramework..."
+echo "Project directory: $PROJECT_DIR"
+
+# Targets
+MACOS_ARM="aarch64-apple-darwin"
+MACOS_X86="x86_64-apple-darwin"
+IOS_ARM="aarch64-apple-ios"
+IOS_SIM_ARM="aarch64-apple-ios-sim"
+IOS_SIM_X86="x86_64-apple-ios"
+
+# Output directories - generate directly into the Swift project
+SWIFT_PROJECT="$PROJECT_DIR/apple/Orion"
+SWIFT_DIR="$SWIFT_PROJECT/Sources/Generated"
+XCFRAMEWORK_DIR="$SWIFT_PROJECT/MailFFI.xcframework"
+HEADERS_DIR="$SWIFT_PROJECT/headers"
+
+# Get SDK paths
+IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+IOS_SIM_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+
+# Clean and create output directories
+rm -rf "$XCFRAMEWORK_DIR" "$HEADERS_DIR"
+mkdir -p "$SWIFT_DIR" "$HEADERS_DIR"
+
+# Deployment targets - match Package.swift minimums
+MACOS_DEPLOYMENT_TARGET="14.0"
+IOS_DEPLOYMENT_TARGET="17.0"
+
+echo ""
+echo "=== Building for macOS (arm64)..."
+export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
+cargo build --release -p mail-ffi --target "$MACOS_ARM"
+unset MACOSX_DEPLOYMENT_TARGET
+
+echo ""
+echo "=== Building for macOS (x86_64)..."
+export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
+cargo build --release -p mail-ffi --target "$MACOS_X86"
+unset MACOSX_DEPLOYMENT_TARGET
+
+echo ""
+echo "=== Building for iOS (arm64)..."
+# Set iOS SDK environment for C dependencies
+export SDKROOT="$IOS_SDK"
+export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+cargo build --release -p mail-ffi --target "$IOS_ARM"
+unset SDKROOT
+unset IPHONEOS_DEPLOYMENT_TARGET
+
+echo ""
+echo "=== Building for iOS Simulator (arm64)..."
+export SDKROOT="$IOS_SIM_SDK"
+export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+cargo build --release -p mail-ffi --target "$IOS_SIM_ARM"
+unset SDKROOT
+unset IPHONEOS_DEPLOYMENT_TARGET
+
+echo ""
+echo "=== Building for iOS Simulator (x86_64)..."
+export SDKROOT="$IOS_SIM_SDK"
+export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+cargo build --release -p mail-ffi --target "$IOS_SIM_X86"
+unset SDKROOT
+unset IPHONEOS_DEPLOYMENT_TARGET
+
+echo ""
+echo "=== Generating Swift bindings..."
+cargo run -p mail-ffi --features bindgen --bin uniffi-bindgen generate \
+    --library "target/$MACOS_ARM/release/libmail_ffi.dylib" \
+    --language swift \
+    --out-dir "$SWIFT_DIR"
+
+echo ""
+echo "=== Creating fat binaries..."
+
+# macOS universal binary (arm64 + x86_64)
+MACOS_UNIVERSAL_DIR="target/universal-macos/release"
+mkdir -p "$MACOS_UNIVERSAL_DIR"
+lipo -create \
+    "target/$MACOS_ARM/release/libmail_ffi.a" \
+    "target/$MACOS_X86/release/libmail_ffi.a" \
+    -output "$MACOS_UNIVERSAL_DIR/libmail_ffi.a"
+echo "Created: $MACOS_UNIVERSAL_DIR/libmail_ffi.a"
+
+# iOS Simulator universal binary (arm64 + x86_64)
+IOS_SIM_UNIVERSAL_DIR="target/universal-ios-sim/release"
+mkdir -p "$IOS_SIM_UNIVERSAL_DIR"
+lipo -create \
+    "target/$IOS_SIM_ARM/release/libmail_ffi.a" \
+    "target/$IOS_SIM_X86/release/libmail_ffi.a" \
+    -output "$IOS_SIM_UNIVERSAL_DIR/libmail_ffi.a"
+echo "Created: $IOS_SIM_UNIVERSAL_DIR/libmail_ffi.a"
+
+echo ""
+echo "=== Preparing headers..."
+
+# Create headers directory
+mkdir -p "$HEADERS_DIR"
+
+# Copy and rename modulemap for XCFramework compatibility
+cp "$SWIFT_DIR/mailFFI.h" "$HEADERS_DIR/"
+if [ -f "$SWIFT_DIR/mailFFI.modulemap" ]; then
+    cp "$SWIFT_DIR/mailFFI.modulemap" "$HEADERS_DIR/module.modulemap"
+fi
+
+echo ""
+echo "=== Creating XCFramework..."
+
+# Remove existing XCFramework if it exists
+rm -rf "$XCFRAMEWORK_DIR"
+
+xcodebuild -create-xcframework \
+    -library "$MACOS_UNIVERSAL_DIR/libmail_ffi.a" \
+    -headers "$HEADERS_DIR" \
+    -library "target/$IOS_ARM/release/libmail_ffi.a" \
+    -headers "$HEADERS_DIR" \
+    -library "$IOS_SIM_UNIVERSAL_DIR/libmail_ffi.a" \
+    -headers "$HEADERS_DIR" \
+    -output "$XCFRAMEWORK_DIR"
+
+# Clean up temporary headers
+rm -rf "$HEADERS_DIR"
+
+echo ""
+echo "=== Build complete!"
+echo ""
+echo "Output files (in apple/Orion/):"
+echo "  - MailFFI.xcframework"
+echo "  - Sources/Generated/mail.swift"
+echo ""
+echo "The Swift project is ready to build:"
+echo "  cd apple/Orion && swift build"
+echo ""
+echo "Or open in Xcode:"
+echo "  ./script/run-swiftui-macos"
