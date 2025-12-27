@@ -34,7 +34,7 @@
 
 ## SwiftUI / iOS
 
-- [ ] Choose minimum deployment targets (currently targeting 26.0 for macOS and iOS)
+- [x] Choose minimum deployment targets (macOS 14.0, iOS 17.0)
 - [x] Wire up MailService FFI calls in MailBridge
 - [x] Implement OAuth flow in AuthService
 - [x] Wire up Add Account and Sync buttons in SidebarView
