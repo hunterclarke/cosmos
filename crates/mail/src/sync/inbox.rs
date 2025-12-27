@@ -247,12 +247,12 @@ impl SyncStats {
 /// # Arguments
 /// * `gmail` - Gmail API client
 /// * `store` - Storage backend
-/// * `account_id` - Account identifier for tracking sync state
+/// * `account_id` - Account ID (FK to accounts table)
 /// * `options` - Sync options
 pub fn sync_gmail(
     gmail: &GmailClient,
     store: &dyn MailStore,
-    account_id: &str,
+    account_id: i64,
     options: SyncOptions,
 ) -> Result<SyncStats> {
     let start = std::time::Instant::now();
@@ -327,7 +327,7 @@ pub fn sync_gmail(
 fn initial_sync(
     gmail: &GmailClient,
     store: &dyn MailStore,
-    account_id: &str,
+    account_id: i64,
     options: &SyncOptions,
 ) -> Result<SyncStats> {
     let sync_start = Instant::now();
@@ -368,13 +368,13 @@ fn initial_sync(
 
     // === PHASE 2: PROCESS ===
     // Process pending messages: INBOX first, then the rest
-    let pending_count = store.count_pending_messages(None)?;
+    let pending_count = store.count_pending_messages(account_id, None)?;
     info!("[SYNC] Phase 2: Processing {} pending messages (INBOX first)...", pending_count);
 
     if pending_count == 0 {
         info!("[SYNC] No pending messages to process, skipping process phase");
     } else {
-        process_phase(store, options, &mut stats)?;
+        process_phase(store, account_id, options, &mut stats)?;
         info!("[SYNC] Process phase complete: {} messages created, {} threads",
             stats.messages_created, stats.threads_created + stats.threads_updated);
     }
@@ -484,7 +484,7 @@ pub struct FetchPhaseStats {
 pub fn fetch_phase(
     gmail: &GmailClient,
     store: &dyn MailStore,
-    account_id: &str,
+    account_id: i64,
     options: &SyncOptions,
     stats: &mut SyncStats,
 ) -> Result<FetchPhaseStats> {
@@ -527,6 +527,7 @@ pub fn fetch_phase(
         let retry_failed = fetch_message_batch(
             gmail,
             store,
+            account_id,
             &failed_ids_to_retry,
             stats,
         );
@@ -590,7 +591,7 @@ pub fn fetch_phase(
         stats.messages_fetched += message_refs.len();
 
         if !to_fetch.is_empty() {
-            let batch_result = fetch_message_batch(gmail, store, &to_fetch, stats);
+            let batch_result = fetch_message_batch(gmail, store, account_id, &to_fetch, stats);
             fetch_stats.fetched += batch_result.fetched;
             fetch_stats.pending += batch_result.pending;
             fetch_stats.failed_ids.extend(batch_result.failed_ids);
@@ -644,6 +645,7 @@ struct BatchFetchResult {
 fn fetch_message_batch(
     gmail: &GmailClient,
     store: &dyn MailStore,
+    account_id: i64,
     to_fetch: &[MessageId],
     stats: &mut SyncStats,
 ) -> BatchFetchResult {
@@ -670,7 +672,7 @@ fn fetch_message_batch(
 
                     match serde_json::to_vec(&gmail_msg) {
                         Ok(data) => {
-                            if let Err(e) = store.store_pending_message(msg_id, &data, label_ids) {
+                            if let Err(e) = store.store_pending_message(msg_id, account_id, &data, label_ids) {
                                 warn!("Failed to store pending message {}: {}", msg_id.as_str(), e);
                                 stats.errors += 1;
                                 result.failed_ids.push(msg_id.as_str().to_string());
@@ -727,6 +729,7 @@ pub struct ProcessBatchResult {
 /// to update the UI between batches. Call repeatedly until `has_more` is false.
 pub fn process_pending_batch(
     store: &dyn MailStore,
+    account_id: i64,
     options: &SyncOptions,
     stats: &mut SyncStats,
     batch_size: usize,
@@ -734,7 +737,7 @@ pub fn process_pending_batch(
     let mut result = ProcessBatchResult::default();
 
     // Get next batch of pending messages (INBOX prioritized automatically)
-    let pending = store.get_pending_messages(None, batch_size)?;
+    let pending = store.get_pending_messages(account_id, None, batch_size)?;
 
     if pending.is_empty() {
         result.remaining = 0;
@@ -758,7 +761,7 @@ pub fn process_pending_batch(
         };
 
         // Normalize
-        let message = match normalize_message(gmail_msg) {
+        let message = match normalize_message(gmail_msg, account_id) {
             Ok(msg) => msg,
             Err(e) => {
                 warn!("Failed to normalize message: {}", e);
@@ -774,7 +777,7 @@ pub fn process_pending_batch(
 
         // Compute thread first (including this new message)
         // Must upsert thread BEFORE message due to FK constraint
-        let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+        let thread = compute_thread(&thread_id, account_id, &[message.clone()], store)?;
         store.upsert_thread(thread.clone())?;
 
         // Now store message (thread exists, FK constraint satisfied)
@@ -809,7 +812,7 @@ pub fn process_pending_batch(
         }
     }
 
-    result.remaining = store.count_pending_messages(None)?;
+    result.remaining = store.count_pending_messages(account_id, None)?;
     result.has_more = result.remaining > 0;
 
     Ok(result)
@@ -822,6 +825,7 @@ pub fn process_pending_batch(
 /// to optimize time-to-inbox.
 fn process_phase(
     store: &dyn MailStore,
+    account_id: i64,
     options: &SyncOptions,
     stats: &mut SyncStats,
 ) -> Result<()> {
@@ -836,7 +840,7 @@ fn process_phase(
 
     loop {
         // Get next batch of pending messages (INBOX prioritized automatically)
-        let pending = store.get_pending_messages(None, process_batch_size)?;
+        let pending = store.get_pending_messages(account_id, None, process_batch_size)?;
 
         if pending.is_empty() {
             break;
@@ -856,7 +860,7 @@ fn process_phase(
 
             // Normalize
             let normalize_start = Instant::now();
-            let message = match normalize_message(gmail_msg) {
+            let message = match normalize_message(gmail_msg, account_id) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to normalize message: {}", e);
@@ -873,7 +877,7 @@ fn process_phase(
             // Compute thread first (including this new message)
             // Must upsert thread BEFORE message due to FK constraint
             let compute_start = Instant::now();
-            let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+            let thread = compute_thread(&thread_id, account_id, &[message.clone()], store)?;
             compute_thread_us += compute_start.elapsed().as_micros() as u64;
 
             let storage_start = Instant::now();
@@ -1047,7 +1051,7 @@ pub fn incremental_sync(
             match result {
                 Ok(gmail_msg) => {
                     let normalize_start = Instant::now();
-                    let normalize_result = normalize_message(gmail_msg);
+                    let normalize_result = normalize_message(gmail_msg, state.account_id);
                     stats.timing.normalize_ms += normalize_start.elapsed().as_micros() as u64;
 
                     match normalize_result {
@@ -1058,7 +1062,7 @@ pub fn incremental_sync(
                             // Compute thread first (including this new message)
                             // Must upsert thread BEFORE message due to FK constraint
                             let compute_start = Instant::now();
-                            let thread = compute_thread(&thread_id, &[message.clone()], store)?;
+                            let thread = compute_thread(&thread_id, state.account_id, &[message.clone()], store)?;
                             stats.timing.compute_thread_ms += compute_start.elapsed().as_micros() as u64;
 
                             let storage_start = Instant::now();
@@ -1108,7 +1112,7 @@ pub fn incremental_sync(
     for thread_id in threads_to_update {
         if store.has_thread(&thread_id)? {
             let compute_start = Instant::now();
-            let thread = compute_thread(&thread_id, &[], store)?;
+            let thread = compute_thread(&thread_id, state.account_id, &[], store)?;
             stats.timing.compute_thread_ms += compute_start.elapsed().as_micros() as u64;
 
             let storage_start = Instant::now();
@@ -1156,6 +1160,7 @@ pub fn incremental_sync(
 /// Compute thread properties from its messages
 fn compute_thread(
     thread_id: &ThreadId,
+    account_id: i64,
     new_messages: &[Message],
     store: &dyn MailStore,
 ) -> Result<Thread> {
@@ -1168,6 +1173,7 @@ fn compute_thread(
         .map(|m| MessageMetadata {
             id: m.id.clone(),
             thread_id: m.thread_id.clone(),
+            account_id: m.account_id,
             from: m.from.clone(),
             to: m.to.clone(),
             cc: m.cc.clone(),
@@ -1223,6 +1229,7 @@ fn compute_thread(
 
     Ok(Thread::new(
         thread_id.clone(),
+        account_id,
         subject,
         latest.body_preview.clone(),
         last_message_at,
@@ -1260,11 +1267,12 @@ mod tests {
             make_test_message("m3", "t1", "Re: Original Subject", 1),
         ];
 
-        let thread = compute_thread(&thread_id, &messages, &store).unwrap();
+        let thread = compute_thread(&thread_id, 1, &messages, &store).unwrap();
 
         assert_eq!(thread.subject, "Original Subject");
         assert_eq!(thread.message_count, 3);
         assert_eq!(thread.snippet, "Body for m3"); // Latest message
+        assert_eq!(thread.account_id, 1);
     }
 
     #[test]
@@ -1282,7 +1290,7 @@ mod tests {
             make_test_message("m3", "t1", "Re: Original Subject", 1),
         ];
 
-        let thread = compute_thread(&thread_id, &new_messages, &store).unwrap();
+        let thread = compute_thread(&thread_id, 1, &new_messages, &store).unwrap();
 
         assert_eq!(thread.message_count, 3);
         assert_eq!(thread.subject, "Original Subject");
@@ -1316,7 +1324,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_force_resync() {
         // Even with existing complete state, force_resync should return InitialSync
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         let action = determine_sync_action(Some(&state), true);
         assert_eq!(action, SyncAction::InitialSync);
     }
@@ -1324,7 +1332,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_incomplete_sync() {
         // Incomplete initial sync with checkpoint
-        let mut state = SyncState::partial("user@gmail.com", "12345");
+        let mut state = SyncState::partial(1, "12345");
         state.fetch_page_token = Some("page_token_abc".to_string());
         state.messages_listed = 5000;
         state.failed_message_ids = vec!["msg1".to_string(), "msg2".to_string()];
@@ -1348,7 +1356,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_incomplete_sync_no_checkpoint() {
         // Incomplete sync but no page token yet (just started)
-        let state = SyncState::partial("user@gmail.com", "12345");
+        let state = SyncState::partial(1, "12345");
 
         let action = determine_sync_action(Some(&state), false);
 
@@ -1369,7 +1377,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_recent_complete_sync() {
         // Recently completed sync should use incremental
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         // state.last_sync_at is set to now() by default
 
         let action = determine_sync_action(Some(&state), false);
@@ -1385,7 +1393,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_stale_sync() {
         // Sync from 6 days ago should trigger StaleResync
-        let mut state = SyncState::new("user@gmail.com", "12345");
+        let mut state = SyncState::new(1, "12345");
         state.last_sync_at = Utc::now() - chrono::Duration::days(6);
 
         let action = determine_sync_action(Some(&state), false);
@@ -1401,7 +1409,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_boundary_4_days() {
         // 4 days is still fresh enough for incremental
-        let mut state = SyncState::new("user@gmail.com", "12345");
+        let mut state = SyncState::new(1, "12345");
         state.last_sync_at = Utc::now() - chrono::Duration::days(4);
 
         let action = determine_sync_action(Some(&state), false);
@@ -1415,7 +1423,7 @@ mod tests {
     #[test]
     fn test_determine_sync_action_boundary_5_days() {
         // 5 days is the threshold for stale
-        let mut state = SyncState::new("user@gmail.com", "12345");
+        let mut state = SyncState::new(1, "12345");
         state.last_sync_at = Utc::now() - chrono::Duration::days(5);
 
         let action = determine_sync_action(Some(&state), false);
@@ -1435,13 +1443,13 @@ mod tests {
 
     #[test]
     fn test_should_auto_sync_incomplete() {
-        let state = SyncState::partial("user@gmail.com", "12345");
+        let state = SyncState::partial(1, "12345");
         assert!(should_auto_sync_on_startup(Some(&state)));
     }
 
     #[test]
     fn test_should_not_auto_sync_complete() {
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         assert!(!should_auto_sync_on_startup(Some(&state)));
     }
 
@@ -1449,7 +1457,7 @@ mod tests {
     fn test_should_not_auto_sync_complete_stale() {
         // Even if stale, a completed sync shouldn't auto-start
         // (user can manually sync if they want)
-        let mut state = SyncState::new("user@gmail.com", "12345");
+        let mut state = SyncState::new(1, "12345");
         state.last_sync_at = Utc::now() - chrono::Duration::days(10);
         assert!(!should_auto_sync_on_startup(Some(&state)));
     }
@@ -1467,7 +1475,7 @@ mod tests {
 
     #[test]
     fn test_sync_state_info_complete() {
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         let info = get_sync_state_info(Some(&state));
 
         assert!(info.has_completed_sync);
@@ -1478,7 +1486,7 @@ mod tests {
 
     #[test]
     fn test_sync_state_info_incomplete_with_progress() {
-        let mut state = SyncState::partial("user@gmail.com", "12345");
+        let mut state = SyncState::partial(1, "12345");
         state.fetch_page_token = Some("token".to_string());
         state.messages_listed = 1000;
         state.failed_message_ids = vec!["m1".to_string()];
@@ -1506,7 +1514,7 @@ mod tests {
         assert_eq!(action1, SyncAction::InitialSync);
 
         // 2. Initial sync started but not finished
-        let partial = SyncState::partial("user@gmail.com", "history_100");
+        let partial = SyncState::partial(1, "history_100");
         let action2 = determine_sync_action(Some(&partial), false);
         assert!(matches!(action2, SyncAction::ResumeInitialSync { .. }));
 
@@ -1529,7 +1537,7 @@ mod tests {
     #[test]
     fn test_sync_state_checkpoint_preservation() {
         // Verify that checkpoints are preserved through state transitions
-        let mut state = SyncState::partial("user@gmail.com", "history_100");
+        let mut state = SyncState::partial(1, "history_100");
         state = state.with_fetch_progress(Some("page_xyz".to_string()), 5000);
         state = state.with_failed_ids(vec!["msg1".to_string(), "msg2".to_string()]);
 

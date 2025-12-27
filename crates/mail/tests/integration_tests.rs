@@ -3,7 +3,7 @@
 //! These tests verify the complete flow from syncing to querying.
 
 use chrono::Utc;
-use mail::models::{EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
+use mail::models::{Account, EmailAddress, Message, MessageId, SyncState, Thread, ThreadId};
 use mail::query::{get_thread_detail, list_threads};
 use mail::storage::{FileBlobStore, InMemoryMailStore, MailStore, SqliteMailStore};
 use mail::{SyncAction, cooldown_elapsed, determine_sync_action, get_sync_state_info, should_auto_sync_on_startup};
@@ -13,6 +13,7 @@ use tempfile::TempDir;
 fn make_message(id: &str, thread_id: &str, subject: &str, age_hours: i64) -> Message {
     let received_at = Utc::now() - chrono::Duration::hours(age_hours);
     Message::builder(MessageId::new(id), ThreadId::new(thread_id))
+        .account_id(1)
         .from(EmailAddress::with_name("Test User", "test@example.com"))
         .to(vec![EmailAddress::new("recipient@example.com")])
         .subject(subject)
@@ -26,6 +27,7 @@ fn make_message(id: &str, thread_id: &str, subject: &str, age_hours: i64) -> Mes
 fn make_thread(id: &str, subject: &str, message_count: usize, age_hours: i64) -> Thread {
     Thread::new(
         ThreadId::new(id),
+        1, // account_id
         subject.to_string(),
         format!("Snippet for thread {}", id),
         Utc::now() - chrono::Duration::hours(age_hours),
@@ -245,6 +247,19 @@ fn create_sqlite_store() -> (SqliteMailStore, TempDir) {
     let blob_path = temp_dir.path().join("blobs.test");
     let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
     let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+
+    // Register a test account so threads/messages can reference it
+    let test_account = Account {
+        id: 0,
+        email: "test@example.com".to_string(),
+        display_name: Some("Test User".to_string()),
+        avatar_color: "#3B82F6".to_string(),
+        is_primary: true,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    store.register_account(test_account).unwrap();
+
     (store, temp_dir)
 }
 
@@ -253,15 +268,15 @@ fn test_sqlite_sync_state_persistence() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Initially no sync state
-    assert!(store.get_sync_state("default").unwrap().is_none());
+    assert!(store.get_sync_state(1).unwrap().is_none());
 
     // Save partial sync state (simulating start of initial sync)
-    let partial = SyncState::partial("default", "history_12345");
+    let partial = SyncState::partial(1, "history_12345");
     store.save_sync_state(partial.clone()).unwrap();
 
     // Verify it persists
-    let retrieved = store.get_sync_state("default").unwrap().unwrap();
-    assert_eq!(retrieved.account_id, "default");
+    let retrieved = store.get_sync_state(1).unwrap().unwrap();
+    assert_eq!(retrieved.account_id, 1);
     assert_eq!(retrieved.history_id, "history_12345");
     assert!(!retrieved.initial_sync_complete);
 }
@@ -271,13 +286,13 @@ fn test_sqlite_sync_checkpoint_persistence() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Save partial state with checkpoint
-    let mut state = SyncState::partial("default", "history_100");
+    let mut state = SyncState::partial(1, "history_100");
     state = state.with_fetch_progress(Some("page_token_xyz".to_string()), 5000);
     state = state.with_failed_ids(vec!["msg1".to_string(), "msg2".to_string(), "msg3".to_string()]);
     store.save_sync_state(state).unwrap();
 
     // Retrieve and verify checkpoint data
-    let retrieved = store.get_sync_state("default").unwrap().unwrap();
+    let retrieved = store.get_sync_state(1).unwrap().unwrap();
     assert_eq!(retrieved.fetch_page_token, Some("page_token_xyz".to_string()));
     assert_eq!(retrieved.messages_listed, 5000);
     assert_eq!(retrieved.failed_message_ids.len(), 3);
@@ -297,7 +312,20 @@ fn test_sqlite_sync_state_across_reopens() {
     {
         let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
-        let mut state = SyncState::partial("default", "history_200");
+
+        // Register a test account first
+        let test_account = Account {
+            id: 0,
+            email: "test@example.com".to_string(),
+            display_name: Some("Test User".to_string()),
+            avatar_color: "#3B82F6".to_string(),
+            is_primary: true,
+            added_at: Utc::now(),
+            token_data: None,
+        };
+        store.register_account(test_account).unwrap();
+
+        let mut state = SyncState::partial(1, "history_200");
         state = state.with_fetch_progress(Some("page_abc".to_string()), 10000);
         state.failed_message_ids = vec!["fail1".to_string()];
         store.save_sync_state(state).unwrap();
@@ -307,7 +335,7 @@ fn test_sqlite_sync_state_across_reopens() {
     {
         let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
-        let retrieved = store.get_sync_state("default").unwrap().unwrap();
+        let retrieved = store.get_sync_state(1).unwrap().unwrap();
 
         assert_eq!(retrieved.history_id, "history_200");
         assert!(!retrieved.initial_sync_complete);
@@ -335,16 +363,16 @@ fn test_sqlite_complete_sync_lifecycle() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Step 1: Initial state - no sync
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
     assert!(state.is_none());
     assert!(should_auto_sync_on_startup(state.as_ref()));
     assert_eq!(determine_sync_action(state.as_ref(), false), SyncAction::InitialSync);
 
     // Step 2: Start initial sync (partial state)
-    let partial = SyncState::partial("default", "history_100");
+    let partial = SyncState::partial(1, "history_100");
     store.save_sync_state(partial).unwrap();
 
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
     assert!(should_auto_sync_on_startup(state.as_ref()));
     assert!(matches!(
         determine_sync_action(state.as_ref(), false),
@@ -357,16 +385,16 @@ fn test_sqlite_complete_sync_lifecycle() {
     store.save_sync_state(checkpointed).unwrap();
 
     // Step 4: More progress
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let more_progress = state.with_fetch_progress(Some("page_2".to_string()), 1000);
     store.save_sync_state(more_progress).unwrap();
 
     // Step 5: Complete sync
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let complete = state.mark_complete();
     store.save_sync_state(complete).unwrap();
 
-    let final_state = store.get_sync_state("default").unwrap();
+    let final_state = store.get_sync_state(1).unwrap();
     assert!(!should_auto_sync_on_startup(final_state.as_ref()));
     assert!(matches!(
         determine_sync_action(final_state.as_ref(), false),
@@ -394,7 +422,7 @@ fn test_sqlite_sync_state_with_mail_data() {
         .unwrap();
 
     // Save sync state
-    let state = SyncState::new("default", "history_500");
+    let state = SyncState::new(1, "history_500");
     store.save_sync_state(state).unwrap();
 
     // Clear mail data only (not sync state)
@@ -405,7 +433,7 @@ fn test_sqlite_sync_state_with_mail_data() {
     assert!(!store.has_message(&MessageId::new("m1")).unwrap());
 
     // But sync state should still exist
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
     assert!(state.is_some());
     assert_eq!(state.unwrap().history_id, "history_500");
 }
@@ -415,11 +443,11 @@ fn test_sqlite_stale_sync_detection() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Create a sync state from 6 days ago
-    let mut stale_state = SyncState::new("default", "old_history");
+    let mut stale_state = SyncState::new(1, "old_history");
     stale_state.last_sync_at = Utc::now() - chrono::Duration::days(6);
     store.save_sync_state(stale_state).unwrap();
 
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
 
     // Should NOT auto-sync (completed sync)
     assert!(!should_auto_sync_on_startup(state.as_ref()));
@@ -438,10 +466,10 @@ fn test_sqlite_force_resync() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Create complete sync state
-    let state = SyncState::new("default", "history_999");
+    let state = SyncState::new(1, "history_999");
     store.save_sync_state(state).unwrap();
 
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
 
     // Force resync should override everything
     assert_eq!(
@@ -460,12 +488,12 @@ fn test_sync_state_info_with_sqlite() {
     assert!(!info.needs_resume);
 
     // Partial state with progress
-    let mut partial = SyncState::partial("default", "h1");
+    let mut partial = SyncState::partial(1, "h1");
     partial = partial.with_fetch_progress(Some("token".to_string()), 2500);
     partial.failed_message_ids = vec!["f1".to_string(), "f2".to_string()];
     store.save_sync_state(partial).unwrap();
 
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
     let info = get_sync_state_info(state.as_ref());
 
     assert!(!info.has_completed_sync);
@@ -492,7 +520,7 @@ fn test_scenario_auth_initial_sync_then_polling() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Step 1: User just authenticated - no sync state
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
     assert!(state.is_none());
 
     // Should auto-sync on startup (first time)
@@ -506,7 +534,7 @@ fn test_scenario_auth_initial_sync_then_polling() {
 
     // Step 2: Initial sync starts - save partial state with history_id
     let history_id_at_start = "12345";
-    let partial = SyncState::partial("default", history_id_at_start);
+    let partial = SyncState::partial(1, history_id_at_start);
     store.save_sync_state(partial).unwrap();
 
     // Simulate some messages being synced (thread first due to FK constraint)
@@ -514,17 +542,17 @@ fn test_scenario_auth_initial_sync_then_polling() {
     store.upsert_message(make_message("m1", "t1", "Test Thread", 1)).unwrap();
 
     // Step 3: Initial sync completes - mark complete
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let complete = state.mark_complete();
     store.save_sync_state(complete).unwrap();
 
     // Verify completion
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     assert!(state.initial_sync_complete);
     assert_eq!(state.history_id, history_id_at_start);
 
     // Step 4: Polling triggers - should use incremental sync
-    let state = store.get_sync_state("default").unwrap();
+    let state = store.get_sync_state(1).unwrap();
 
     // Should NOT auto-sync on startup (already completed)
     assert!(!should_auto_sync_on_startup(state.as_ref()));
@@ -546,15 +574,15 @@ fn test_parallel_sync_decision_paths() {
     let (store2, _temp_dir2) = create_sqlite_store();
 
     // Store 1: Fresh state - should do initial sync
-    let state1 = store1.get_sync_state("default").unwrap();
+    let state1 = store1.get_sync_state(1).unwrap();
     let action1 = determine_sync_action(state1.as_ref(), false);
     assert_eq!(action1, SyncAction::InitialSync);
 
     // Store 2: Complete state - should do incremental sync
-    let complete = SyncState::new("default", "history_999");
+    let complete = SyncState::new(1, "history_999");
     store2.save_sync_state(complete).unwrap();
 
-    let state2 = store2.get_sync_state("default").unwrap();
+    let state2 = store2.get_sync_state(1).unwrap();
     let action2 = determine_sync_action(state2.as_ref(), false);
 
     match &action2 {
@@ -591,15 +619,27 @@ fn test_scenario_launch_resume_incomplete_sync() {
         let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
 
+        // Register a test account first
+        let test_account = Account {
+            id: 0,
+            email: "test@example.com".to_string(),
+            display_name: Some("Test User".to_string()),
+            avatar_color: "#3B82F6".to_string(),
+            is_primary: true,
+            added_at: Utc::now(),
+            token_data: None,
+        };
+        store.register_account(test_account).unwrap();
+
         // No previous sync state
-        assert!(store.get_sync_state("default").unwrap().is_none());
+        assert!(store.get_sync_state(1).unwrap().is_none());
 
         // Start initial sync - save partial state
-        let partial = SyncState::partial("default", "history_at_crash");
+        let partial = SyncState::partial(1, "history_at_crash");
         store.save_sync_state(partial).unwrap();
 
         // Simulate progress: listed 5000 messages, have page token for next batch
-        let state = store.get_sync_state("default").unwrap().unwrap();
+        let state = store.get_sync_state(1).unwrap().unwrap();
         let with_progress = state.with_fetch_progress(
             Some("next_page_token_xyz".to_string()),
             5000,
@@ -607,7 +647,7 @@ fn test_scenario_launch_resume_incomplete_sync() {
         store.save_sync_state(with_progress).unwrap();
 
         // Simulate some failed message IDs
-        let state = store.get_sync_state("default").unwrap().unwrap();
+        let state = store.get_sync_state(1).unwrap().unwrap();
         let with_failures = state.with_failed_ids(vec![
             "failed_msg_1".to_string(),
             "failed_msg_2".to_string(),
@@ -627,7 +667,7 @@ fn test_scenario_launch_resume_incomplete_sync() {
         let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
 
         // Check sync state on launch
-        let state = store.get_sync_state("default").unwrap();
+        let state = store.get_sync_state(1).unwrap();
         assert!(state.is_some(), "Sync state should persist across restarts");
 
         let state_ref = state.as_ref();
@@ -669,7 +709,7 @@ fn test_scenario_launch_resume_incomplete_sync() {
         assert_eq!(store.count_threads().unwrap(), 1);
 
         // Simulate resuming and completing sync
-        let state = store.get_sync_state("default").unwrap().unwrap();
+        let state = store.get_sync_state(1).unwrap().unwrap();
 
         // Continue from checkpoint...
         // (In real code, fetch_phase would resume from page_token)
@@ -679,7 +719,7 @@ fn test_scenario_launch_resume_incomplete_sync() {
         store.save_sync_state(complete).unwrap();
 
         // Now should use incremental sync
-        let final_state = store.get_sync_state("default").unwrap();
+        let final_state = store.get_sync_state(1).unwrap();
         assert!(!should_auto_sync_on_startup(final_state.as_ref()));
         assert!(matches!(
             determine_sync_action(final_state.as_ref(), false),
@@ -698,10 +738,10 @@ fn test_cooldown_with_sync_state_timing() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Complete a sync
-    let state = SyncState::new("default", "history_100");
+    let state = SyncState::new(1, "history_100");
     store.save_sync_state(state).unwrap();
 
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
 
     // Just synced - cooldown should NOT be elapsed (30s default)
     assert!(
@@ -710,11 +750,11 @@ fn test_cooldown_with_sync_state_timing() {
     );
 
     // Simulate time passing - create state with older last_sync_at
-    let mut old_state = SyncState::new("default", "history_200");
+    let mut old_state = SyncState::new(1, "history_200");
     old_state.last_sync_at = Utc::now() - Duration::seconds(60);
     store.save_sync_state(old_state).unwrap();
 
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
 
     // 60 seconds ago - cooldown should be elapsed for 30s threshold
     assert!(
@@ -756,7 +796,7 @@ fn test_incremental_sync_gmail_parity_all_change_types() {
     store.upsert_message(msg2.clone()).unwrap();
 
     // Save initial sync state
-    let initial_state = SyncState::new("default", "history_1000");
+    let initial_state = SyncState::new(1, "history_1000");
     store.save_sync_state(initial_state).unwrap();
 
     // Verify initial state
@@ -820,7 +860,7 @@ fn test_incremental_sync_gmail_parity_all_change_types() {
     assert!(!store.has_message(&MessageId::new("m4")).unwrap());
 
     // Update sync state with new history_id
-    let updated_state = SyncState::new("default", "history_2000");
+    let updated_state = SyncState::new(1, "history_2000");
     store.save_sync_state(updated_state).unwrap();
 
     // === Verify final state ===
@@ -844,7 +884,7 @@ fn test_incremental_sync_gmail_parity_all_change_types() {
     assert!(!m2.label_ids.contains(&"INBOX".to_string()));
 
     // Sync state is current
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     assert_eq!(state.history_id, "history_2000");
     assert!(state.initial_sync_complete);
 }
@@ -914,11 +954,11 @@ fn test_polling_cycle_with_cooldown() {
     let (store, _temp_dir) = create_sqlite_store();
 
     // Complete initial sync
-    let state = SyncState::new("default", "history_start");
+    let state = SyncState::new(1, "history_start");
     store.save_sync_state(state).unwrap();
 
     // Poll 1: Just synced, should skip (cooldown)
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let should_sync_1 = cooldown_elapsed(Some(state.last_sync_at), 30);
     assert!(!should_sync_1, "Poll 1: Should skip due to cooldown");
 
@@ -928,7 +968,7 @@ fn test_polling_cycle_with_cooldown() {
     store.save_sync_state(aged_state).unwrap();
 
     // Poll 2: Cooldown elapsed, should sync
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let should_sync_2 = cooldown_elapsed(Some(state.last_sync_at), 30);
     assert!(should_sync_2, "Poll 2: Should sync, cooldown elapsed");
 
@@ -941,11 +981,369 @@ fn test_polling_cycle_with_cooldown() {
     }
 
     // After sync completes, update state with new history_id
-    let new_state = SyncState::new("default", "history_after_poll");
+    let new_state = SyncState::new(1, "history_after_poll");
     store.save_sync_state(new_state).unwrap();
 
     // Poll 3: Just synced again, should skip
-    let state = store.get_sync_state("default").unwrap().unwrap();
+    let state = store.get_sync_state(1).unwrap().unwrap();
     let should_sync_3 = cooldown_elapsed(Some(state.last_sync_at), 30);
     assert!(!should_sync_3, "Poll 3: Should skip, just synced");
+}
+
+// === Multi-Account Tests ===
+
+/// Test list_accounts and get_account_by_email methods
+#[test]
+fn test_account_management_methods() {
+    let (store, _temp_dir) = create_sqlite_store();
+
+    // list_accounts should return the test account from create_sqlite_store
+    let accounts = store.list_accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].email, "test@example.com");
+    assert!(accounts[0].is_primary);
+
+    // get_account_by_email should find existing account
+    let found = store.get_account_by_email("test@example.com").unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().email, "test@example.com");
+
+    // get_account_by_email should return None for non-existent account
+    let not_found = store.get_account_by_email("nonexistent@example.com").unwrap();
+    assert!(not_found.is_none());
+
+    // Register a second account
+    let second_account = Account {
+        id: 0,
+        email: "second@example.com".to_string(),
+        display_name: Some("Second User".to_string()),
+        avatar_color: "#10B981".to_string(),
+        is_primary: false,
+        added_at: Utc::now(),
+        token_data: Some("{\"access_token\":\"test\"}".to_string()),
+    };
+    let registered = store.register_account(second_account).unwrap();
+    assert!(registered.id > 0); // ID should be assigned by database
+    assert_eq!(registered.email, "second@example.com");
+
+    // list_accounts should now return both
+    let accounts = store.list_accounts().unwrap();
+    assert_eq!(accounts.len(), 2);
+
+    // get_account should work with the new ID
+    let by_id = store.get_account(registered.id).unwrap();
+    assert!(by_id.is_some());
+    assert_eq!(by_id.unwrap().email, "second@example.com");
+
+    // get_account with non-existent ID
+    let no_account = store.get_account(999).unwrap();
+    assert!(no_account.is_none());
+}
+
+/// Test unified vs filtered thread listing by account
+#[test]
+fn test_unified_vs_filtered_thread_listing() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("mail.test.sqlite");
+    let blob_path = temp_dir.path().join("blobs.test");
+    let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+    let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+
+    // Register two accounts
+    let account1 = Account {
+        id: 0,
+        email: "alice@example.com".to_string(),
+        display_name: Some("Alice".to_string()),
+        avatar_color: "#3B82F6".to_string(),
+        is_primary: true,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    let account2 = Account {
+        id: 0,
+        email: "bob@example.com".to_string(),
+        display_name: Some("Bob".to_string()),
+        avatar_color: "#10B981".to_string(),
+        is_primary: false,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    let alice = store.register_account(account1).unwrap();
+    let bob = store.register_account(account2).unwrap();
+
+    // Create threads for each account
+    let mut alice_thread = Thread::new(
+        ThreadId::new("t-alice-1"),
+        alice.id,
+        "Alice's Thread".to_string(),
+        "Snippet from Alice".to_string(),
+        Utc::now() - chrono::Duration::hours(1),
+        1,
+        Some("Alice".to_string()),
+        "alice@example.com".to_string(),
+        false,
+    );
+    alice_thread.is_unread = true;
+
+    let mut bob_thread = Thread::new(
+        ThreadId::new("t-bob-1"),
+        bob.id,
+        "Bob's Thread".to_string(),
+        "Snippet from Bob".to_string(),
+        Utc::now() - chrono::Duration::hours(2),
+        1,
+        Some("Bob".to_string()),
+        "bob@example.com".to_string(),
+        false,
+    );
+    bob_thread.is_unread = false;
+
+    store.upsert_thread(alice_thread).unwrap();
+    store.upsert_thread(bob_thread).unwrap();
+
+    // Create messages for threads with INBOX label
+    let mut alice_msg = Message::builder(MessageId::new("m-alice-1"), ThreadId::new("t-alice-1"))
+        .account_id(alice.id)
+        .from(EmailAddress::with_name("Alice", "alice@example.com"))
+        .to(vec![EmailAddress::new("recipient@example.com")])
+        .subject("Alice's Thread")
+        .body_preview("Hello from Alice")
+        .received_at(Utc::now() - chrono::Duration::hours(1))
+        .internal_date((Utc::now() - chrono::Duration::hours(1)).timestamp_millis())
+        .build();
+    alice_msg.label_ids = vec!["INBOX".to_string(), "UNREAD".to_string()];
+
+    let mut bob_msg = Message::builder(MessageId::new("m-bob-1"), ThreadId::new("t-bob-1"))
+        .account_id(bob.id)
+        .from(EmailAddress::with_name("Bob", "bob@example.com"))
+        .to(vec![EmailAddress::new("recipient@example.com")])
+        .subject("Bob's Thread")
+        .body_preview("Hello from Bob")
+        .received_at(Utc::now() - chrono::Duration::hours(2))
+        .internal_date((Utc::now() - chrono::Duration::hours(2)).timestamp_millis())
+        .build();
+    bob_msg.label_ids = vec!["INBOX".to_string()];
+
+    store.upsert_message(alice_msg).unwrap();
+    store.upsert_message(bob_msg).unwrap();
+
+    // Test unified view (None = all accounts)
+    let all_threads = store.list_threads_for_account(None, 100, 0).unwrap();
+    assert_eq!(all_threads.len(), 2, "Unified view should show all threads");
+
+    let all_count = store.count_threads_for_account(None).unwrap();
+    assert_eq!(all_count, 2);
+
+    // Test filtered by Alice's account
+    let alice_threads = store.list_threads_for_account(Some(alice.id), 100, 0).unwrap();
+    assert_eq!(alice_threads.len(), 1, "Alice's filter should show only her threads");
+    assert_eq!(alice_threads[0].id.as_str(), "t-alice-1");
+
+    let alice_count = store.count_threads_for_account(Some(alice.id)).unwrap();
+    assert_eq!(alice_count, 1);
+
+    // Test filtered by Bob's account
+    let bob_threads = store.list_threads_for_account(Some(bob.id), 100, 0).unwrap();
+    assert_eq!(bob_threads.len(), 1, "Bob's filter should show only his threads");
+    assert_eq!(bob_threads[0].id.as_str(), "t-bob-1");
+
+    // Test label filtering with account filter
+    let alice_inbox = store.list_threads_by_label_for_account("INBOX", Some(alice.id), 100, 0).unwrap();
+    assert_eq!(alice_inbox.len(), 1);
+
+    let bob_inbox = store.list_threads_by_label_for_account("INBOX", Some(bob.id), 100, 0).unwrap();
+    assert_eq!(bob_inbox.len(), 1);
+
+    // Unified INBOX should have both
+    let all_inbox = store.list_threads_by_label_for_account("INBOX", None, 100, 0).unwrap();
+    assert_eq!(all_inbox.len(), 2);
+
+    // Test unread counts with account filter
+    let alice_unread = store.count_unread_threads_by_label_for_account("INBOX", Some(alice.id)).unwrap();
+    assert_eq!(alice_unread, 1, "Alice has 1 unread thread");
+
+    let bob_unread = store.count_unread_threads_by_label_for_account("INBOX", Some(bob.id)).unwrap();
+    assert_eq!(bob_unread, 0, "Bob has 0 unread threads");
+
+    let all_unread = store.count_unread_threads_by_label_for_account("INBOX", None).unwrap();
+    assert_eq!(all_unread, 1, "Total unread is 1");
+}
+
+/// Test clear_account_data removes all related data for an account
+#[test]
+fn test_clear_account_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("mail.test.sqlite");
+    let blob_path = temp_dir.path().join("blobs.test");
+    let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+    let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+
+    // Register two accounts
+    let account1 = Account {
+        id: 0,
+        email: "alice@example.com".to_string(),
+        display_name: Some("Alice".to_string()),
+        avatar_color: "#3B82F6".to_string(),
+        is_primary: true,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    let account2 = Account {
+        id: 0,
+        email: "bob@example.com".to_string(),
+        display_name: Some("Bob".to_string()),
+        avatar_color: "#10B981".to_string(),
+        is_primary: false,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    let alice = store.register_account(account1).unwrap();
+    let bob = store.register_account(account2).unwrap();
+
+    // Create threads and messages for both accounts
+    let alice_thread = Thread::new(
+        ThreadId::new("t-alice"),
+        alice.id,
+        "Alice's Thread".to_string(),
+        "Snippet".to_string(),
+        Utc::now(),
+        1,
+        Some("Alice".to_string()),
+        "alice@example.com".to_string(),
+        false,
+    );
+    let bob_thread = Thread::new(
+        ThreadId::new("t-bob"),
+        bob.id,
+        "Bob's Thread".to_string(),
+        "Snippet".to_string(),
+        Utc::now(),
+        1,
+        Some("Bob".to_string()),
+        "bob@example.com".to_string(),
+        false,
+    );
+
+    store.upsert_thread(alice_thread).unwrap();
+    store.upsert_thread(bob_thread).unwrap();
+
+    let alice_msg = Message::builder(MessageId::new("m-alice"), ThreadId::new("t-alice"))
+        .account_id(alice.id)
+        .from(EmailAddress::with_name("Alice", "alice@example.com"))
+        .to(vec![EmailAddress::new("recipient@example.com")])
+        .subject("Alice's Thread")
+        .body_preview("Hello")
+        .received_at(Utc::now())
+        .internal_date(Utc::now().timestamp_millis())
+        .build();
+    let bob_msg = Message::builder(MessageId::new("m-bob"), ThreadId::new("t-bob"))
+        .account_id(bob.id)
+        .from(EmailAddress::with_name("Bob", "bob@example.com"))
+        .to(vec![EmailAddress::new("recipient@example.com")])
+        .subject("Bob's Thread")
+        .body_preview("Hello")
+        .received_at(Utc::now())
+        .internal_date(Utc::now().timestamp_millis())
+        .build();
+
+    store.upsert_message(alice_msg).unwrap();
+    store.upsert_message(bob_msg).unwrap();
+
+    // Create sync state for both
+    store.save_sync_state(SyncState::new(alice.id, "history-alice")).unwrap();
+    store.save_sync_state(SyncState::new(bob.id, "history-bob")).unwrap();
+
+    // Verify initial state
+    assert_eq!(store.count_threads().unwrap(), 2);
+    assert!(store.has_message(&MessageId::new("m-alice")).unwrap());
+    assert!(store.has_message(&MessageId::new("m-bob")).unwrap());
+    assert!(store.get_sync_state(alice.id).unwrap().is_some());
+    assert!(store.get_sync_state(bob.id).unwrap().is_some());
+
+    // Clear Alice's account data
+    store.clear_account_data(alice.id).unwrap();
+
+    // Alice's data should be gone
+    assert!(!store.has_message(&MessageId::new("m-alice")).unwrap(), "Alice's message should be deleted");
+    assert!(store.get_sync_state(alice.id).unwrap().is_none(), "Alice's sync state should be deleted");
+    let alice_threads = store.list_threads_for_account(Some(alice.id), 100, 0).unwrap();
+    assert_eq!(alice_threads.len(), 0, "Alice should have no threads");
+
+    // Bob's data should still exist
+    assert!(store.has_message(&MessageId::new("m-bob")).unwrap(), "Bob's message should still exist");
+    assert!(store.get_sync_state(bob.id).unwrap().is_some(), "Bob's sync state should still exist");
+    let bob_threads = store.list_threads_for_account(Some(bob.id), 100, 0).unwrap();
+    assert_eq!(bob_threads.len(), 1, "Bob should still have his thread");
+
+    // Account record should still exist (clear_account_data doesn't delete the account itself)
+    let alice_account = store.get_account(alice.id).unwrap();
+    assert!(alice_account.is_some(), "Account record should still exist after clear_account_data");
+
+    // Total thread count should be 1 (only Bob's)
+    assert_eq!(store.count_threads().unwrap(), 1);
+}
+
+/// Test delete_account removes the account and all its data
+#[test]
+fn test_delete_account_cascade() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("mail.test.sqlite");
+    let blob_path = temp_dir.path().join("blobs.test");
+    let blob_store = Box::new(FileBlobStore::new(&blob_path).unwrap());
+    let store = SqliteMailStore::new(&db_path, blob_store).unwrap();
+
+    // Register an account
+    let account = Account {
+        id: 0,
+        email: "test@example.com".to_string(),
+        display_name: Some("Test User".to_string()),
+        avatar_color: "#3B82F6".to_string(),
+        is_primary: true,
+        added_at: Utc::now(),
+        token_data: None,
+    };
+    let registered = store.register_account(account).unwrap();
+    let account_id = registered.id;
+
+    // Create some data for the account
+    let thread = Thread::new(
+        ThreadId::new("t-test"),
+        account_id,
+        "Test Thread".to_string(),
+        "Snippet".to_string(),
+        Utc::now(),
+        1,
+        Some("Test".to_string()),
+        "test@example.com".to_string(),
+        false,
+    );
+    store.upsert_thread(thread).unwrap();
+
+    let msg = Message::builder(MessageId::new("m-test"), ThreadId::new("t-test"))
+        .account_id(account_id)
+        .from(EmailAddress::new("test@example.com"))
+        .to(vec![EmailAddress::new("recipient@example.com")])
+        .subject("Test")
+        .body_preview("Hello")
+        .received_at(Utc::now())
+        .internal_date(Utc::now().timestamp_millis())
+        .build();
+    store.upsert_message(msg).unwrap();
+
+    store.save_sync_state(SyncState::new(account_id, "history")).unwrap();
+
+    // Verify data exists
+    assert!(store.get_account(account_id).unwrap().is_some());
+    assert!(store.has_message(&MessageId::new("m-test")).unwrap());
+    assert_eq!(store.count_threads().unwrap(), 1);
+
+    // Delete the account
+    store.delete_account(account_id).unwrap();
+
+    // Everything should be gone
+    assert!(store.get_account(account_id).unwrap().is_none(), "Account should be deleted");
+    assert!(!store.has_message(&MessageId::new("m-test")).unwrap(), "Messages should be deleted");
+    assert_eq!(store.count_threads().unwrap(), 0, "Threads should be deleted");
+    assert!(store.get_sync_state(account_id).unwrap().is_none(), "Sync state should be deleted");
+    assert_eq!(store.list_accounts().unwrap().len(), 0, "No accounts should remain");
 }

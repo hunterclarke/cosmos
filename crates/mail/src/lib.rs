@@ -23,7 +23,7 @@ pub mod sync;
 pub use actions::ActionHandler;
 pub use config::GmailCredentials;
 pub use gmail::{GmailAuth, GmailClient, HistoryExpiredError, api::ProfileResponse};
-pub use models::{label_icon, label_sort_order, EmailAddress, Label, LabelId, Message, MessageId, SyncState, Thread, ThreadId};
+pub use models::{label_icon, label_sort_order, Account, EmailAddress, Label, LabelId, Message, MessageId, SyncState, Thread, ThreadId};
 pub use query::{ThreadDetail, ThreadSummary, get_thread_detail, list_threads, list_threads_by_label};
 pub use search::{FieldHighlight, HighlightSpan, ParsedQuery, SearchIndex, SearchResult, parse_query, search_threads};
 pub use storage::{

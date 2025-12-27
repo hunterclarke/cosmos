@@ -5,15 +5,16 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::webview::WebView;
-use gpui_component::{ActiveTheme, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable, Size as ComponentSize};
 use log::{debug, error, info, warn};
 use mail::{
-    ActionHandler, FileBlobStore, GmailAuth, GmailClient, Label, LabelId, MailStore, SearchIndex,
-    SqliteMailStore, SyncOptions, SyncState, SyncStats, ThreadId,
+    Account, ActionHandler, FileBlobStore, GmailAuth, GmailClient, Label, LabelId, MailStore,
+    SearchIndex, SqliteMailStore, SyncOptions, SyncState, SyncStats, ThreadId,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::components::{SearchBox, SearchBoxEvent, ShortcutsHelp};
+use crate::components::{AccountItem, AllAccountsItem, SearchBox, SearchBoxEvent, ShortcutsHelp};
 use crate::input::{
     Dismiss, GoToAllMail, GoToDrafts, GoToInbox, GoToSent, GoToStarred, GoToTrash, ShowShortcuts,
 };
@@ -56,17 +57,52 @@ pub enum ListContext {
     Search,
 }
 
+/// State for a single Gmail account
+pub struct AccountState {
+    /// The account record from the database
+    pub account: Account,
+    /// Gmail API client for this account
+    pub gmail_client: Arc<GmailClient>,
+    /// Action handler for email operations (used for per-account actions)
+    #[allow(dead_code)]
+    pub action_handler: Arc<ActionHandler>,
+    /// Whether this account is currently syncing
+    pub is_syncing: bool,
+    /// Last successful sync timestamp
+    pub last_sync_at: Option<DateTime<Utc>>,
+    /// Last sync error message
+    pub sync_error: Option<String>,
+}
+
 /// Root application state
 pub struct OrionApp {
     current_view: View,
     store: Arc<dyn MailStore>,
+
+    // === Multi-Account State ===
+    /// Per-account state (Gmail client, action handler, sync status)
+    accounts: HashMap<i64, AccountState>,
+    /// Currently selected account for filtering (None = unified view, all accounts)
+    selected_account: Option<i64>,
+    /// Primary account ID (first registered, used for fallback)
+    primary_account_id: Option<i64>,
+
+    // === Primary Account Shortcuts ===
+    // These fields mirror the primary account's state for convenient access.
+    // They are automatically updated when loading/adding accounts.
+    // Used by: sync(), action handlers (archive, star, read, trash), sidebar display.
+    //
+    // These are NOT legacy fields - they provide quick access to the primary account
+    // without HashMap lookups, which is useful for the common single-account case.
     gmail_client: Option<Arc<GmailClient>>,
-    /// Action handler for email operations (archive, star, read/unread)
     action_handler: Option<Arc<ActionHandler>>,
+    /// App-level syncing flag (true if legacy sync() is running)
     is_syncing: bool,
     sync_error: Option<String>,
-    /// Last successful sync timestamp
     last_sync_at: Option<DateTime<Utc>>,
+    profile_email: Option<String>,
+
+    // === UI State ===
     pub thread_list_view: Option<Entity<ThreadListView>>,
     thread_view: Option<Entity<ThreadView>>,
     /// Available mailbox labels/folders
@@ -93,8 +129,8 @@ pub struct OrionApp {
     pending_g_sequence: bool,
     /// The list context from which the current thread was opened
     thread_list_context: ListContext,
-    /// Profile email address (fetched from Gmail)
-    profile_email: Option<String>,
+
+    // === Sync Configuration ===
     /// Minimum seconds between syncs (cooldown)
     sync_cooldown_secs: u64,
     /// Background polling interval in seconds
@@ -103,6 +139,12 @@ pub struct OrionApp {
     poll_task: Option<Task<()>>,
     /// Track window active state for foreground detection
     was_window_active: bool,
+
+    // === OAuth Credentials ===
+    /// OAuth client ID (stored for account discovery after storage loads)
+    oauth_client_id: Option<String>,
+    /// OAuth client secret
+    oauth_client_secret: Option<String>,
 }
 
 impl OrionApp {
@@ -125,11 +167,21 @@ impl OrionApp {
         Self {
             current_view: View::Inbox,
             store,
+
+            // Multi-account state
+            accounts: HashMap::new(),
+            selected_account: None, // Unified view by default
+            primary_account_id: None,
+
+            // Primary account shortcuts (set by load_accounts/add_account)
             gmail_client: None,
             action_handler: None,
             is_syncing: false,
             sync_error: None,
             last_sync_at: None,
+            profile_email: None,
+
+            // UI state
             thread_list_view: Some(thread_list_view),
             thread_view: None,
             labels: Sidebar::default_labels(),
@@ -144,12 +196,23 @@ impl OrionApp {
             show_shortcuts_help: false,
             pending_g_sequence: false,
             thread_list_context: ListContext::Inbox,
-            profile_email: None,
+
+            // Sync config
             sync_cooldown_secs: 30,
             poll_interval_secs: 60,
             poll_task: None,
             was_window_active: true,
+
+            // OAuth credentials (set later via set_credentials)
+            oauth_client_id: None,
+            oauth_client_secret: None,
         }
+    }
+
+    /// Store OAuth credentials for later account discovery
+    pub fn set_credentials(&mut self, client_id: String, client_secret: String) {
+        self.oauth_client_id = Some(client_id);
+        self.oauth_client_secret = Some(client_secret);
     }
 
     /// Load persistent storage in the background
@@ -179,7 +242,13 @@ impl OrionApp {
                         start.elapsed()
                     );
 
-                    let sync_state = store.get_sync_state("default").ok().flatten();
+                    // During initial load, we don't know which account is primary yet.
+                    // Account ID 1 is used because:
+                    // 1. For new databases: first registered account gets ID 1
+                    // 2. For existing databases: the original single account has ID 1
+                    // After load_accounts() runs, we'll use the actual primary account.
+                    let account_id: i64 = 1;
+                    let sync_state = store.get_sync_state(account_id).ok().flatten();
                     let sync_info = mail::get_sync_state_info(sync_state.as_ref());
                     let last_sync_at = sync_info.last_sync_at;
                     let should_auto_sync = mail::should_auto_sync_on_startup(sync_state.as_ref());
@@ -210,12 +279,11 @@ impl OrionApp {
                         app.last_sync_at = last_sync_at;
                         app.search_index = search_index;
 
-                        // Update action handler with the new store
-                        if let Some(gmail_client) = &app.gmail_client {
-                            app.action_handler = Some(Arc::new(ActionHandler::new(
-                                gmail_client.clone(),
-                                store.clone(),
-                            )));
+                        // Load accounts from database
+                        if let (Some(client_id), Some(client_secret)) =
+                            (app.oauth_client_id.clone(), app.oauth_client_secret.clone())
+                        {
+                            app.load_accounts(client_id, client_secret, cx);
                         }
 
                         // Update thread list view with the real store
@@ -231,10 +299,9 @@ impl OrionApp {
 
                         info!("Persistent storage loaded");
 
-                        // Auto-start sync if:
-                        // 1. Gmail is configured but we haven't synced yet (first time)
-                        // 2. Or there's an incomplete initial sync that needs to be resumed
-                        if app.gmail_client.is_some() && should_auto_sync {
+                        // Auto-start sync if Gmail is configured (either via accounts or legacy)
+                        let has_gmail = !app.accounts.is_empty() || app.gmail_client.is_some();
+                        if has_gmail && should_auto_sync {
                             if sync_info.needs_resume {
                                 if let Some(ref progress) = sync_info.resume_progress {
                                     info!(
@@ -253,7 +320,7 @@ impl OrionApp {
                         }
 
                         // Start background polling if Gmail is configured
-                        if app.gmail_client.is_some() {
+                        if has_gmail {
                             app.start_polling(cx);
                         }
 
@@ -670,20 +737,267 @@ impl OrionApp {
         .detach();
     }
 
-    /// Initialize Gmail client with credentials
-    pub fn init_gmail(&mut self, client_id: String, client_secret: String) -> anyhow::Result<()> {
-        let auth = GmailAuth::new(client_id, client_secret)?;
-        let client = GmailClient::new(auth);
-        let gmail_client = Arc::new(client);
-        self.gmail_client = Some(gmail_client.clone());
+    /// Add a new Gmail account via OAuth flow
+    ///
+    /// This will:
+    /// 1. Open browser for OAuth authentication (runs on background thread)
+    /// 2. Get the user's email from Gmail API
+    /// 3. Save account with token to database
+    /// 4. Create AccountState
+    pub fn add_account(&mut self, cx: &mut Context<Self>) {
+        let (Some(client_id), Some(client_secret)) =
+            (self.oauth_client_id.clone(), self.oauth_client_secret.clone())
+        else {
+            error!("No OAuth credentials configured");
+            return;
+        };
 
-        // Create action handler now that we have the Gmail client
-        self.action_handler = Some(Arc::new(ActionHandler::new(
-            gmail_client,
-            self.store.clone(),
-        )));
+        let store = self.store.clone();
+        let current_account_count = self.accounts.len();
+        let background = cx.background_executor().clone();
 
-        Ok(())
+        info!("Starting OAuth flow for new account...");
+
+        cx.spawn(async move |this, cx| {
+            // Run OAuth flow on background thread to avoid blocking UI
+            let oauth_result = background
+                .spawn(async move {
+                    // Create auth with no existing token (will trigger OAuth flow)
+                    let auth = GmailAuth::with_token_data(
+                        client_id.clone(),
+                        client_secret.clone(),
+                        None,
+                    );
+                    let client = GmailClient::new(auth);
+
+                    // Get access token (triggers OAuth flow in browser)
+                    let profile = client.get_profile()?;
+                    let email = profile.email_address;
+                    let token_data = client.get_token_data();
+
+                    // Check if account already exists
+                    if let Ok(Some(_)) = store.get_account_by_email(&email) {
+                        return Err(anyhow::anyhow!("Account {} already exists", email));
+                    }
+
+                    // Create and save account
+                    let is_primary = current_account_count == 0;
+                    let new_account = Account {
+                        id: 0,
+                        email: email.clone(),
+                        display_name: None,
+                        avatar_color: Self::generate_avatar_color(current_account_count),
+                        is_primary,
+                        added_at: chrono::Utc::now(),
+                        token_data,
+                    };
+
+                    let account = store.register_account(new_account)?;
+                    info!("Saved account: {} (id={})", email, account.id);
+
+                    Ok((account, client_id, client_secret))
+                })
+                .await;
+
+            // Update app state on main thread
+            match oauth_result {
+                Ok((account, client_id, client_secret)) => {
+                    cx.update(|cx| {
+                        this.update(cx, |app, cx| {
+                            // Create AccountState
+                            let auth = GmailAuth::with_token_data(
+                                client_id,
+                                client_secret,
+                                account.token_data.clone(),
+                            );
+                            let gmail_client = Arc::new(GmailClient::new(auth));
+                            let action_handler = Arc::new(ActionHandler::new(
+                                gmail_client.clone(),
+                                app.store.clone(),
+                            ));
+
+                            let account_state = AccountState {
+                                account: account.clone(),
+                                gmail_client: gmail_client.clone(),
+                                action_handler: action_handler.clone(),
+                                is_syncing: false,
+                                last_sync_at: None,
+                                sync_error: None,
+                            };
+
+                            if account.is_primary {
+                                app.primary_account_id = Some(account.id);
+                                app.gmail_client = Some(gmail_client);
+                                app.action_handler = Some(action_handler);
+                                app.profile_email = Some(account.email.clone());
+                            }
+
+                            let account_id = account.id;
+                            app.accounts.insert(account_id, account_state);
+                            cx.notify();
+
+                            info!("Account {} added successfully", account.email);
+
+                            // Start initial sync for the new account
+                            app.sync_account(account_id, cx);
+                        })
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    error!("Failed to add account: {}", e);
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Load and initialize all accounts from database
+    ///
+    /// Loads accounts from SQLite, uses token_data field for auth,
+    /// and creates AccountState for each.
+    pub fn load_accounts(&mut self, client_id: String, client_secret: String, cx: &mut Context<Self>) {
+        let accounts = match self.store.list_accounts() {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                warn!("Failed to load accounts: {}", e);
+                return;
+            }
+        };
+
+        if accounts.is_empty() {
+            info!("No accounts in database, starting add account flow...");
+            self.add_account(cx);
+            return;
+        }
+
+        info!("Loading {} account(s) from database", accounts.len());
+
+        for account in accounts {
+            // Create GmailAuth with token_data from database
+            let auth = GmailAuth::with_token_data(
+                client_id.clone(),
+                client_secret.clone(),
+                account.token_data.clone(),
+            );
+
+            // Create Gmail client and action handler
+            let gmail_client = Arc::new(GmailClient::new(auth));
+            let action_handler = Arc::new(ActionHandler::new(
+                gmail_client.clone(),
+                self.store.clone(),
+            ));
+
+            // Create AccountState
+            let account_state = AccountState {
+                account: account.clone(),
+                gmail_client: gmail_client.clone(),
+                action_handler: action_handler.clone(),
+                is_syncing: false,
+                last_sync_at: None,
+                sync_error: None,
+            };
+
+            // Set primary account fields
+            if account.is_primary {
+                self.primary_account_id = Some(account.id);
+                self.gmail_client = Some(gmail_client);
+                self.action_handler = Some(action_handler);
+                self.profile_email = Some(account.email.clone());
+            }
+
+            self.accounts.insert(account.id, account_state);
+            info!(
+                "Loaded account: {} (id={}, primary={}, has_token={})",
+                account.email,
+                account.id,
+                account.is_primary,
+                account.token_data.is_some()
+            );
+        }
+
+        cx.notify();
+    }
+
+    /// Generate a consistent avatar color based on account index
+    fn generate_avatar_color(index: usize) -> String {
+        // Use a set of pleasant, distinguishable colors
+        let colors = [
+            "hsl(210, 70%, 50%)", // Blue
+            "hsl(150, 70%, 40%)", // Green
+            "hsl(340, 70%, 50%)", // Pink
+            "hsl(45, 80%, 50%)",  // Orange
+            "hsl(270, 60%, 55%)", // Purple
+            "hsl(180, 60%, 45%)", // Teal
+        ];
+        colors[index % colors.len()].to_string()
+    }
+
+    // === Multi-Account Management Methods ===
+
+    /// Get the account ID to use for operations
+    ///
+    /// If an account is selected (filtered view), returns that account.
+    /// Otherwise falls back to primary account.
+    /// Returns None if no accounts are registered.
+    pub fn current_account_id(&self) -> Option<i64> {
+        self.selected_account.or(self.primary_account_id)
+    }
+
+    /// Get the account ID to use for operations, with a fallback for legacy code.
+    ///
+    /// This is used by sync operations that need an account ID but were written
+    /// before multi-account support. It defaults to 1 for backwards compatibility
+    /// with existing databases that have account_id=1.
+    ///
+    /// New code should use `current_account_id()` and handle the None case.
+    fn current_account_id_or_default(&self) -> i64 {
+        self.current_account_id().unwrap_or(1)
+    }
+
+    /// Set the account filter for views
+    ///
+    /// Pass `None` for unified view (all accounts), or `Some(id)` for single account.
+    pub fn set_account_filter(&mut self, account_id: Option<i64>, cx: &mut Context<Self>) {
+        self.selected_account = account_id;
+
+        // Update thread list view with the new account filter
+        if let Some(thread_list) = &self.thread_list_view {
+            thread_list.update(cx, |view, cx| {
+                view.set_account_filter(account_id, cx);
+            });
+        }
+
+        cx.notify();
+    }
+
+    /// Check if we're in unified view (all accounts)
+    #[allow(dead_code)]
+    pub fn is_unified_view(&self) -> bool {
+        self.selected_account.is_none()
+    }
+
+    /// Get all registered accounts
+    #[allow(dead_code)]
+    pub fn list_accounts(&self) -> Vec<&AccountState> {
+        self.accounts.values().collect()
+    }
+
+    /// Sync all accounts (or just the selected account if filtered)
+    ///
+    /// This is called by the sync button in the sidebar.
+    pub fn sync_all_accounts(&mut self, cx: &mut Context<Self>) {
+        // If a specific account is selected, just sync that one
+        if let Some(account_id) = self.selected_account {
+            self.sync_account(account_id, cx);
+            return;
+        }
+
+        // Otherwise sync all accounts
+        let account_ids: Vec<i64> = self.accounts.keys().copied().collect();
+        for account_id in account_ids {
+            self.sync_account(account_id, cx);
+        }
     }
 
     /// Navigate to thread list view
@@ -883,6 +1197,333 @@ impl OrionApp {
         }));
     }
 
+    /// Trigger sync for a specific account
+    ///
+    /// This is the preferred way to sync individual accounts in multi-account mode.
+    pub fn sync_account(&mut self, account_id: i64, cx: &mut Context<Self>) {
+        use mail::{fetch_phase, process_pending_batch};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Check if this account is already syncing
+        let Some(account_state) = self.accounts.get_mut(&account_id) else {
+            warn!("[SYNC] Account {} not found", account_id);
+            return;
+        };
+
+        if account_state.is_syncing {
+            debug!("[SYNC] Account {} already syncing", account_id);
+            return;
+        }
+
+        let client = account_state.gmail_client.clone();
+        let account_email = account_state.account.email.clone();
+
+        // Mark account as syncing
+        account_state.is_syncing = true;
+        cx.notify();
+
+        info!("[SYNC] Starting sync for account {} (id={})", account_email, account_id);
+
+        let store = self.store.clone();
+        let search_index = self.search_index.clone();
+        let background = cx.background_executor().clone();
+
+        cx.spawn(async move |this, cx| {
+            let options = SyncOptions {
+                search_index: search_index.clone(),
+                ..Default::default()
+            };
+
+            // Get history_id for sync state
+            let client_for_profile = client.clone();
+            let profile_result = background
+                .spawn(async move { client_for_profile.get_profile() })
+                .await;
+
+            let history_id = match profile_result {
+                Ok(profile) => {
+                    info!(
+                        "[SYNC] Account {} history_id={}",
+                        account_email, profile.history_id
+                    );
+                    Some(profile.history_id)
+                }
+                Err(e) => {
+                    warn!("[SYNC] Failed to get profile for {}: {}", account_email, e);
+                    None
+                }
+            };
+
+            // Check for existing sync state
+            let existing_sync_state = store.get_sync_state(account_id).ok().flatten();
+            let sync_info = mail::get_sync_state_info(existing_sync_state.as_ref());
+            let has_existing_sync = sync_info.last_sync_at.is_some();
+
+            // First sync for this account - clear any stale data
+            if !has_existing_sync {
+                info!("[SYNC] First sync for account {} - clearing account data", account_email);
+                if let Err(e) = store.clear_account_data(account_id) {
+                    warn!("[SYNC] Failed to clear account data: {}", e);
+                }
+            }
+
+            // Determine sync action
+            let sync_action = mail::determine_sync_action(existing_sync_state.as_ref(), false);
+            debug!("[SYNC] Account {} sync action: {:?}", account_email, sync_action);
+
+            // Handle incremental sync (fast path)
+            if let mail::SyncAction::IncrementalSync { history_id: _ } = &sync_action {
+                if let Some(ref state) = existing_sync_state {
+                    info!("[SYNC] Account {} performing incremental sync", account_email);
+
+                    let store_for_sync = store.clone();
+                    let client_for_sync = client.clone();
+                    let options_for_sync = options.clone();
+                    let state_clone = state.clone();
+
+                    let sync_result = background
+                        .spawn(async move {
+                            mail::incremental_sync(
+                                &client_for_sync,
+                                store_for_sync.as_ref(),
+                                &state_clone,
+                                &options_for_sync,
+                            )
+                        })
+                        .await;
+
+                    match sync_result {
+                        Ok(stats) => {
+                            info!(
+                                "[SYNC] Account {} incremental sync complete: {} created, {} updated",
+                                account_email, stats.messages_created, stats.messages_updated
+                            );
+
+                            // Update account state
+                            cx.update(|cx| {
+                                this.update(cx, |app, cx| {
+                                    if let Some(state) = app.accounts.get_mut(&account_id) {
+                                        state.is_syncing = false;
+                                        state.last_sync_at = Some(chrono::Utc::now());
+                                        state.sync_error = None;
+                                    }
+                                    // Refresh thread list
+                                    if let Some(thread_list) = &app.thread_list_view {
+                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                    }
+                                    cx.notify();
+                                })
+                            })
+                            .ok();
+                            return;
+                        }
+                        Err(e) => {
+                            if e.downcast_ref::<mail::HistoryExpiredError>().is_some() {
+                                info!("[SYNC] Account {} history expired, will do full sync", account_email);
+                                let _ = store.delete_sync_state(account_id);
+                            } else {
+                                error!("[SYNC] Account {} incremental sync failed: {}", account_email, e);
+                                cx.update(|cx| {
+                                    this.update(cx, |app, cx| {
+                                        if let Some(state) = app.accounts.get_mut(&account_id) {
+                                            state.is_syncing = false;
+                                            state.sync_error = Some(format!("Sync failed: {}", e));
+                                        }
+                                        cx.notify();
+                                    })
+                                })
+                                .ok();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Full sync path
+            // Save partial sync state
+            if !sync_info.needs_resume {
+                if let Some(ref history_id) = history_id {
+                    let partial_state = SyncState::partial(account_id, history_id);
+                    if let Err(e) = store.save_sync_state(partial_state) {
+                        warn!("[SYNC] Failed to save partial sync state: {}", e);
+                    }
+                }
+            }
+
+            let mut stats = SyncStats::default();
+            let fetch_done = Arc::new(AtomicBool::new(false));
+            let fetch_error: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(None));
+
+            // Fetch phase
+            let store_for_fetch = store.clone();
+            let client_clone = client.clone();
+            let options_clone = options.clone();
+            let fetch_done_clone = fetch_done.clone();
+            let fetch_error_clone = fetch_error.clone();
+
+            background
+                .spawn(async move {
+                    let mut fetch_stats = SyncStats::default();
+                    match fetch_phase(
+                        &client_clone,
+                        store_for_fetch.as_ref(),
+                        account_id,
+                        &options_clone,
+                        &mut fetch_stats,
+                    ) {
+                        Ok(_) => {
+                            info!("[SYNC] Account {} fetch phase complete", account_id);
+                        }
+                        Err(e) => {
+                            error!("[SYNC] Account {} fetch phase failed: {}", account_id, e);
+                            *fetch_error_clone.lock().unwrap() = Some(e.to_string());
+                        }
+                    }
+                    fetch_done_clone.store(true, Ordering::SeqCst);
+                })
+                .detach();
+
+            // Process phase
+            let batch_size = 50;
+            let mut consecutive_empty = 0;
+
+            loop {
+                // Check for fetch errors
+                if let Some(ref err) = *fetch_error.lock().unwrap() {
+                    error!("[SYNC] Account {} stopping due to fetch error: {}", account_id, err);
+                    cx.update(|cx| {
+                        this.update(cx, |app, cx| {
+                            if let Some(state) = app.accounts.get_mut(&account_id) {
+                                state.is_syncing = false;
+                                state.sync_error = Some(err.clone());
+                            }
+                            cx.notify();
+                        })
+                    })
+                    .ok();
+                    return;
+                }
+
+                let store_for_batch = store.clone();
+                let options_clone = options.clone();
+                let mut batch_stats = stats.clone();
+
+                let batch_result = background
+                    .spawn(async move {
+                        process_pending_batch(
+                            store_for_batch.as_ref(),
+                            account_id,
+                            &options_clone,
+                            &mut batch_stats,
+                            batch_size,
+                        )
+                        .map(|result| (result, batch_stats))
+                    })
+                    .await;
+
+                match batch_result {
+                    Ok((result, updated_stats)) => {
+                        stats = updated_stats;
+                        let processed = result.processed;
+                        let remaining = result.remaining;
+
+                        if processed > 0 {
+                            consecutive_empty = 0;
+                            cx.update(|cx| {
+                                this.update(cx, |app, cx| {
+                                    if let Some(thread_list) = &app.thread_list_view {
+                                        thread_list.update(cx, |view, cx| view.load_threads(cx));
+                                    }
+                                    debug!(
+                                        "[SYNC] Account {} processed {} messages, {} remaining",
+                                        account_id, processed, remaining
+                                    );
+                                    cx.notify();
+                                })
+                            })
+                            .ok();
+                        } else {
+                            consecutive_empty += 1;
+                        }
+
+                        let is_fetch_done = fetch_done.load(Ordering::SeqCst);
+                        if !result.has_more && is_fetch_done {
+                            let store_for_check = store.clone();
+                            let final_pending = background
+                                .spawn(async move {
+                                    store_for_check
+                                        .count_pending_messages(account_id, None)
+                                        .unwrap_or(0)
+                                })
+                                .await;
+
+                            if final_pending == 0 {
+                                debug!("[SYNC] Account {} no more pending messages", account_id);
+                                break;
+                            }
+                        }
+
+                        if !result.has_more && !is_fetch_done {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+
+                        if consecutive_empty > 100 && is_fetch_done {
+                            debug!("[SYNC] Account {} safety exit after {} empty batches", account_id, consecutive_empty);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("[SYNC] Account {} process batch failed: {}", account_id, e);
+                        cx.update(|cx| {
+                            this.update(cx, |app, cx| {
+                                if let Some(state) = app.accounts.get_mut(&account_id) {
+                                    state.is_syncing = false;
+                                    state.sync_error = Some(format!("Process failed: {}", e));
+                                }
+                                cx.notify();
+                            })
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+
+            // Mark sync complete
+            if let Some(ref history_id) = history_id {
+                let complete_state = SyncState::new(account_id, history_id);
+                if let Err(e) = store.save_sync_state(complete_state) {
+                    error!("[SYNC] Account {} failed to mark sync complete: {}", account_id, e);
+                } else {
+                    info!("[SYNC] Account {} sync complete", account_id);
+                }
+            }
+
+            // Update account state
+            cx.update(|cx| {
+                this.update(cx, |app, cx| {
+                    if let Some(state) = app.accounts.get_mut(&account_id) {
+                        state.is_syncing = false;
+                        state.last_sync_at = Some(chrono::Utc::now());
+                        state.sync_error = None;
+                    }
+                    // Also update legacy last_sync_at for UI
+                    app.last_sync_at = Some(chrono::Utc::now());
+                    // Refresh thread list
+                    if let Some(thread_list) = &app.thread_list_view {
+                        thread_list.update(cx, |view, cx| view.load_threads(cx));
+                    }
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Trigger inbox sync with event-driven UI updates
     ///
     /// Runs fetch and process phases in parallel for maximum throughput.
@@ -922,6 +1563,8 @@ impl OrionApp {
         let store = self.store.clone();
         let search_index = self.search_index.clone();
         let background = cx.background_executor().clone();
+        // Use primary account or fallback to 1 for legacy compatibility
+        let account_id = self.current_account_id_or_default();
 
         cx.spawn(async move |this, cx| {
             let options = SyncOptions {
@@ -1006,7 +1649,7 @@ impl OrionApp {
             // IMPORTANT: Only save a NEW partial state if we don't already have one.
             // If we're resuming an incomplete sync, the existing state has the page_token
             // and failed_message_ids that we need to resume from.
-            let existing_sync_state = store.get_sync_state("default").ok().flatten();
+            let existing_sync_state = store.get_sync_state(account_id).ok().flatten();
             let sync_info = mail::get_sync_state_info(existing_sync_state.as_ref());
 
             // Determine what sync action to take
@@ -1043,7 +1686,7 @@ impl OrionApp {
 
                             // Update the sync state with new history_id
                             if let Some(ref new_history_id) = history_id {
-                                let updated_state = SyncState::new("default", new_history_id);
+                                let updated_state = SyncState::new(account_id, new_history_id);
                                 if let Err(e) = store.save_sync_state(updated_state) {
                                     warn!("[SYNC] Failed to update sync state: {}", e);
                                 }
@@ -1088,7 +1731,7 @@ impl OrionApp {
                                     }
                                 }
                                 // Delete sync state to trigger fresh initial sync
-                                let _ = store.delete_sync_state("default");
+                                let _ = store.delete_sync_state(account_id);
                             } else {
                                 // Other error - report and stop
                                 error!("[SYNC] Incremental sync failed: {}", e);
@@ -1110,7 +1753,7 @@ impl OrionApp {
             // Full sync path: Initial sync or resume incomplete sync
             if !sync_info.needs_resume {
                 if let Some(ref history_id) = history_id {
-                    let partial_state = SyncState::partial("default", history_id);
+                    let partial_state = SyncState::partial(account_id, history_id);
                     if let Err(e) = store.save_sync_state(partial_state) {
                         warn!("[SYNC] Failed to save partial sync state: {}", e);
                     } else {
@@ -1147,7 +1790,7 @@ impl OrionApp {
                     match fetch_phase(
                         &client_clone,
                         store_for_fetch.as_ref(),
-                        "default",
+                        account_id,
                         &options_clone,
                         &mut fetch_stats,
                     ) {
@@ -1196,6 +1839,7 @@ impl OrionApp {
                     .spawn(async move {
                         process_pending_batch(
                             store_for_batch.as_ref(),
+                            account_id,
                             &options_clone,
                             &mut batch_stats,
                             batch_size,
@@ -1240,7 +1884,7 @@ impl OrionApp {
                             let store_for_check = store.clone();
                             let final_pending = background
                                 .spawn(async move {
-                                    store_for_check.count_pending_messages(None).unwrap_or(0)
+                                    store_for_check.count_pending_messages(account_id, None).unwrap_or(0)
                                 })
                                 .await;
 
@@ -1287,7 +1931,7 @@ impl OrionApp {
             // Mark sync state as complete
             // This updates the partial state saved at the start to indicate sync finished
             if let Some(ref history_id) = history_id {
-                let complete_state = SyncState::new("default", history_id);
+                let complete_state = SyncState::new(account_id, history_id);
                 if let Err(e) = store.save_sync_state(complete_state) {
                     error!("[SYNC] Failed to mark sync complete: {}", e);
                 } else {
@@ -1335,8 +1979,15 @@ impl OrionApp {
         let theme = cx.theme();
         let labels = self.labels.clone();
         let selected = self.selected_label.clone();
-        let is_syncing = self.is_syncing;
+        // Check if any account is syncing (or the app-level legacy flag)
+        let is_syncing =
+            self.is_syncing || self.accounts.values().any(|state| state.is_syncing);
         let last_sync = self.last_sync_at;
+
+        // Gather accounts for the account section
+        let accounts: Vec<_> = self.accounts.values().map(|s| s.account.clone()).collect();
+        let selected_account = self.selected_account;
+        let has_accounts = !accounts.is_empty();
 
         div()
             .flex()
@@ -1367,6 +2018,85 @@ impl OrionApp {
                                     .child("Mail"),
                             ),
                     ),
+            )
+            // Account section (always show - at minimum has Add Account button)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px_2()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    // Section header
+                    .child(
+                        div()
+                            .px_1()
+                            .py_1()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("ACCOUNTS"),
+                    )
+                    // All Accounts option (only when we have accounts)
+                    .when(has_accounts, |el| {
+                        el.child(
+                            div()
+                                .id("account-all")
+                                .on_click(cx.listener(|app, _event, _window, cx| {
+                                    app.set_account_filter(None, cx);
+                                }))
+                                .child(AllAccountsItem::new(selected_account.is_none())),
+                        )
+                    })
+                        // Individual accounts
+                        .children(accounts.into_iter().map(|account| {
+                            let account_id = account.id;
+                            let is_selected = selected_account == Some(account_id);
+                            let is_account_syncing = self
+                                .accounts
+                                .get(&account_id)
+                                .map(|s| s.is_syncing)
+                                .unwrap_or(false);
+
+                            div()
+                                .id(ElementId::Name(format!("account-{}", account_id).into()))
+                                .on_click(cx.listener(move |app, _event, _window, cx| {
+                                    app.set_account_filter(Some(account_id), cx);
+                                }))
+                                .child(
+                                    AccountItem::new(account, is_selected).syncing(is_account_syncing),
+                                )
+                        }))
+                        // Add Account button
+                        .child(
+                            div()
+                                .id("add-account")
+                                .px_2()
+                                .py_1()
+                                .mx_1()
+                                .mt_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.list_hover))
+                                .on_click(cx.listener(|app, _event, _window, cx| {
+                                    app.add_account(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            Icon::new(IconName::Plus)
+                                                .with_size(ComponentSize::XSmall)
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child("Add Account"),
+                                ),
+                        ),
             )
             // Navigation labels - fills remaining space
             .child(
@@ -1422,53 +2152,10 @@ impl OrionApp {
                                     .loading(is_syncing)
                                     .cursor_pointer()
                                     .on_click(cx.listener(|app, _event, _window, cx| {
-                                        app.sync(cx);
+                                        app.sync_all_accounts(cx);
                                     })),
                             ),
-                    )
-                    // Profile row
-                    .child({
-                        let email = self
-                            .profile_email
-                            .clone()
-                            .unwrap_or_else(|| "...".to_string());
-                        let avatar_letter = email
-                            .chars()
-                            .next()
-                            .map(|c| c.to_uppercase().to_string())
-                            .unwrap_or_else(|| "?".to_string());
-
-                        div()
-                            .px_3()
-                            .py_2()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size_8()
-                                    .rounded_full()
-                                    .bg(theme.primary)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.primary_foreground)
-                                    .child(avatar_letter),
-                            )
-                            .child(
-                                div().flex().flex_col().overflow_hidden().flex_1().child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.foreground)
-                                        .text_ellipsis()
-                                        .child(email),
-                                ),
-                            )
-                    }),
+                    ),
             )
     }
 

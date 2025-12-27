@@ -33,6 +33,11 @@ impl GmailClient {
         Self { auth }
     }
 
+    /// Get token data for database storage
+    pub fn get_token_data(&self) -> Option<String> {
+        self.auth.get_token_data()
+    }
+
     /// List message IDs from the user's mailbox
     ///
     /// # Arguments

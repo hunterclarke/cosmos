@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 /// 3. Process any pending messages from previous fetch
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncState {
-    /// Gmail user or account identifier
-    pub account_id: String,
+    /// Account ID (foreign key to accounts table)
+    pub account_id: i64,
     /// Gmail historyId for incremental sync
     pub history_id: String,
     /// When we last successfully synced
@@ -52,9 +52,9 @@ fn default_true() -> bool {
 
 impl SyncState {
     /// Create a new SyncState after completed initial sync
-    pub fn new(account_id: impl Into<String>, history_id: impl Into<String>) -> Self {
+    pub fn new(account_id: i64, history_id: impl Into<String>) -> Self {
         Self {
-            account_id: account_id.into(),
+            account_id,
             history_id: history_id.into(),
             last_sync_at: Utc::now(),
             sync_version: 1,
@@ -70,9 +70,9 @@ impl SyncState {
     /// The history_id should be captured at the START of initial sync,
     /// so we can run incremental sync after to catch up on any messages
     /// that arrived during the sync.
-    pub fn partial(account_id: impl Into<String>, history_id: impl Into<String>) -> Self {
+    pub fn partial(account_id: i64, history_id: impl Into<String>) -> Self {
         Self {
-            account_id: account_id.into(),
+            account_id,
             history_id: history_id.into(),
             last_sync_at: Utc::now(),
             sync_version: 1,
@@ -147,29 +147,29 @@ mod tests {
 
     #[test]
     fn test_new_sync_state() {
-        let state = SyncState::new("user@gmail.com", "12345");
-        assert_eq!(state.account_id, "user@gmail.com");
+        let state = SyncState::new(1, "12345");
+        assert_eq!(state.account_id, 1);
         assert_eq!(state.history_id, "12345");
         assert_eq!(state.sync_version, 1);
     }
 
     #[test]
     fn test_updated_sync_state() {
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         let updated = state.updated("67890");
-        assert_eq!(updated.account_id, "user@gmail.com");
+        assert_eq!(updated.account_id, 1);
         assert_eq!(updated.history_id, "67890");
     }
 
     #[test]
     fn test_is_recent() {
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         assert!(state.is_recent());
     }
 
     #[test]
     fn test_serialization() {
-        let state = SyncState::new("user@gmail.com", "12345");
+        let state = SyncState::new(1, "12345");
         let json = serde_json::to_string(&state).unwrap();
         let deserialized: SyncState = serde_json::from_str(&json).unwrap();
         assert_eq!(state.account_id, deserialized.account_id);

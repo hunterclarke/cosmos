@@ -7,7 +7,8 @@ use gpui_component::skeleton::Skeleton;
 use gpui_component::{ActiveTheme, VirtualListScrollHandle, v_virtual_list};
 use gpui::ScrollStrategy;
 use log::{debug, error};
-use mail::{MailStore, ThreadId, ThreadSummary, list_threads, list_threads_by_label};
+use mail::{MailStore, ThreadId, ThreadSummary};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -34,12 +35,16 @@ pub struct ThreadListView {
     item_sizes: Rc<Vec<Size<Pixels>>>,
     /// Current label filter (e.g., "INBOX", "SENT", etc.)
     label_filter: Option<String>,
+    /// Current account filter (None = unified view, all accounts)
+    account_filter: Option<i64>,
     /// Focus handle for keyboard input
     focus_handle: FocusHandle,
     /// Total count of threads for current label (from storage, not in-memory)
     total_count: usize,
     /// Unread count of threads for current label (from storage, not in-memory)
     unread_count: usize,
+    /// Cached account emails for display in unified view (account_id -> email)
+    account_emails: HashMap<i64, String>,
 }
 
 impl ThreadListView {
@@ -56,9 +61,11 @@ impl ThreadListView {
             scroll_handle: VirtualListScrollHandle::new(),
             item_sizes: Rc::new(Vec::new()),
             label_filter: Some("INBOX".to_string()),
+            account_filter: None, // Unified view by default
             focus_handle: cx.focus_handle(),
             total_count: 0,
             unread_count: 0,
+            account_emails: HashMap::new(),
         }
     }
 
@@ -230,6 +237,22 @@ impl ThreadListView {
         cx.notify();
     }
 
+    /// Set account filter for multi-account support
+    ///
+    /// Pass `None` for unified view (all accounts), or `Some(id)` for single account.
+    pub fn set_account_filter(&mut self, account_id: Option<i64>, cx: &mut Context<Self>) {
+        self.account_filter = account_id;
+        self.load_threads(cx);
+        // Reset selection to first item when changing account
+        self.selected_index = if self.threads.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.selected_thread = self.threads.first().map(|t| t.id.clone());
+        cx.notify();
+    }
+
     /// Get the display name for the current label
     fn current_label_name(&self) -> &str {
         match self.label_filter.as_deref() {
@@ -250,34 +273,81 @@ impl ThreadListView {
         self.is_loading = true;
         self.error_message = None;
 
+        // Load account emails for unified view display
+        if self.account_filter.is_none() {
+            // In unified view, load all account emails for display
+            if let Ok(accounts) = self.store.list_accounts() {
+                self.account_emails = accounts
+                    .into_iter()
+                    .map(|a| (a.id, a.email))
+                    .collect();
+            }
+        } else {
+            // Not in unified view, clear the cache
+            self.account_emails.clear();
+        }
+
         // Use storage-layer filtering for efficiency
-        // "ALL" means all mail - no filtering
+        // "ALL" means all mail - no filtering by label
+        // account_filter of None means unified view (all accounts)
         let label = self.label_filter.as_deref();
+        let account_id = self.account_filter;
+
         let result = match label {
             None | Some("ALL") => {
-                debug!("Loading all threads (no filter)");
-                list_threads(self.store.as_ref(), 500, 0)
+                debug!(
+                    "Loading all threads (no label filter, account: {:?})",
+                    account_id
+                );
+                self.store
+                    .list_threads_for_account(account_id, 500, 0)
+                    .map(|threads| {
+                        threads
+                            .into_iter()
+                            .map(ThreadSummary::from)
+                            .collect::<Vec<_>>()
+                    })
             }
             Some(label) => {
-                debug!("Loading threads with label filter: {}", label);
-                list_threads_by_label(self.store.as_ref(), label, 500, 0)
+                debug!(
+                    "Loading threads with label filter: {}, account: {:?}",
+                    label, account_id
+                );
+                self.store
+                    .list_threads_by_label_for_account(label, account_id, 500, 0)
+                    .map(|threads| {
+                        threads
+                            .into_iter()
+                            .map(ThreadSummary::from)
+                            .collect::<Vec<_>>()
+                    })
             }
         };
 
-        // Fetch actual counts from storage
+        // Fetch actual counts from storage (with account filter)
         let (total, unread) = match label {
             None | Some("ALL") => {
-                let total = self.store.count_threads().unwrap_or(0);
+                let total = self
+                    .store
+                    .count_threads_for_account(account_id)
+                    .unwrap_or(0);
+                // For ALL, we need to count unread differently - iterate over threads
                 let unread = self
                     .store
-                    .list_threads(10000, 0)
+                    .list_threads_for_account(account_id, 10000, 0)
                     .map(|threads| threads.iter().filter(|t| t.is_unread).count())
                     .unwrap_or(0);
                 (total, unread)
             }
             Some(label) => {
-                let total = self.store.count_threads_by_label(label).unwrap_or(0);
-                let unread = self.store.count_unread_threads_by_label(label).unwrap_or(0);
+                let total = self
+                    .store
+                    .count_threads_by_label_for_account(label, account_id)
+                    .unwrap_or(0);
+                let unread = self
+                    .store
+                    .count_unread_threads_by_label_for_account(label, account_id)
+                    .unwrap_or(0);
                 (total, unread)
             }
         };
@@ -477,6 +547,12 @@ impl ThreadListView {
                                 let is_selected = selected_index == Some(ix);
                                 let thread_id = thread.id.clone();
 
+                                // In unified view, look up account email for display
+                                let account_email = view
+                                    .account_emails
+                                    .get(&thread.account_id)
+                                    .cloned();
+
                                 div()
                                     .id(ElementId::Name(thread_id.0.clone().into()))
                                     .h(px(THREAD_ITEM_HEIGHT))
@@ -486,7 +562,10 @@ impl ThreadListView {
                                         view.selected_index = Some(ix);
                                         view.select_thread(thread_id.clone(), cx);
                                     }))
-                                    .child(ThreadListItem::new(thread, is_selected))
+                                    .child(
+                                        ThreadListItem::new(thread, is_selected)
+                                            .with_account(account_email),
+                                    )
                             })
                             .collect()
                     },

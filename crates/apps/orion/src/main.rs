@@ -72,11 +72,9 @@ fn main() {
                 // Load Gmail credentials from config file or environment
                 match GmailCredentials::load() {
                     Ok(creds) => {
-                        if let Err(e) = app.init_gmail(creds.client_id, creds.client_secret) {
-                            error!("Failed to initialize Gmail client: {}", e);
-                        } else {
-                            info!("Gmail client initialized successfully");
-                        }
+                        // Store credentials for account discovery (after storage loads)
+                        app.set_credentials(creds.client_id, creds.client_secret);
+                        info!("Gmail credentials loaded");
                     }
                     Err(e) => {
                         warn!("Gmail credentials not found: {}", e);

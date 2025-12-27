@@ -80,8 +80,28 @@ pub fn search_threads(
     query: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<SearchResult>> {
+    search_threads_for_account(index, store, query, limit, None)
+}
+
+/// Search threads by query string with optional account filter
+///
+/// Same as `search_threads` but allows filtering to a specific account.
+///
+/// # Arguments
+/// * `index` - The search index to query
+/// * `store` - Mail store for fetching thread metadata
+/// * `query` - Search query string (supports Gmail-style operators)
+/// * `limit` - Maximum number of results to return
+/// * `account_id` - Optional account ID to filter results (None = all accounts)
+pub fn search_threads_for_account(
+    index: &SearchIndex,
+    store: &dyn crate::storage::MailStore,
+    query: &str,
+    limit: usize,
+    account_id: Option<i64>,
+) -> anyhow::Result<Vec<SearchResult>> {
     let parsed = parse_query(query);
-    index.search(&parsed, limit, store)
+    index.search(&parsed, limit, store, account_id)
 }
 
 #[cfg(test)]
