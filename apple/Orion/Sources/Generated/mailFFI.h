@@ -243,6 +243,13 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
+typedef void (*UniffiCallbackInterfaceLogCallbackMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_CALLBACK_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SYNC_PROGRESS_CALLBACK_METHOD0
 typedef void (*UniffiCallbackInterfaceSyncProgressCallbackMethod0)(uint64_t, uint32_t, RustBuffer, RustBuffer, void* _Nonnull, 
@@ -255,6 +262,15 @@ typedef void (*UniffiCallbackInterfaceSyncProgressCallbackMethod0)(uint64_t, uin
 typedef void (*UniffiCallbackInterfaceSyncProgressCallbackMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_LOG_CALLBACK
+typedef struct UniffiVTableCallbackInterfaceLogCallback {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceLogCallbackMethod0 _Nonnull onLog;
+} UniffiVTableCallbackInterfaceLogCallback;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SYNC_PROGRESS_CALLBACK
@@ -372,6 +388,11 @@ void uniffi_mail_fn_method_mailservice_trash_thread(uint64_t ptr, RustBuffer thr
 void uniffi_mail_fn_method_mailservice_update_account_token(uint64_t ptr, int64_t account_id, RustBuffer token_json, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_INIT_CALLBACK_VTABLE_LOGCALLBACK
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_INIT_CALLBACK_VTABLE_LOGCALLBACK
+void uniffi_mail_fn_init_callback_vtable_logcallback(const UniffiVTableCallbackInterfaceLogCallback* _Nonnull vtable
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_INIT_CALLBACK_VTABLE_SYNCPROGRESSCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_INIT_CALLBACK_VTABLE_SYNCPROGRESSCALLBACK
 void uniffi_mail_fn_init_callback_vtable_syncprogresscallback(const UniffiVTableCallbackInterfaceSyncProgressCallback* _Nonnull vtable
@@ -382,6 +403,12 @@ void uniffi_mail_fn_init_callback_vtable_syncprogresscallback(const UniffiVTable
 RustBuffer uniffi_mail_fn_func_create_token_json(RustBuffer access_token, RustBuffer refresh_token, RustBuffer expires_at, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_DISABLE_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_DISABLE_LOGGING
+void uniffi_mail_fn_func_disable_logging(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_GET_LABEL_ICON
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_GET_LABEL_ICON
 RustBuffer uniffi_mail_fn_func_get_label_icon(RustBuffer label_id, RustCallStatus *_Nonnull out_status
@@ -390,6 +417,11 @@ RustBuffer uniffi_mail_fn_func_get_label_icon(RustBuffer label_id, RustCallStatu
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_GET_LABEL_SORT_ORDER
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_GET_LABEL_SORT_ORDER
 uint32_t uniffi_mail_fn_func_get_label_sort_order(RustBuffer label_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_INITIALIZE_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_INITIALIZE_LOGGING
+void uniffi_mail_fn_func_initialize_logging(uint64_t callback, uint8_t max_level, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_FUNC_PARSE_SEARCH_QUERY
@@ -663,6 +695,12 @@ uint16_t uniffi_mail_checksum_func_create_token_json(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_DISABLE_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_DISABLE_LOGGING
+uint16_t uniffi_mail_checksum_func_disable_logging(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_GET_LABEL_ICON
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_GET_LABEL_ICON
 uint16_t uniffi_mail_checksum_func_get_label_icon(void
@@ -672,6 +710,12 @@ uint16_t uniffi_mail_checksum_func_get_label_icon(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_GET_LABEL_SORT_ORDER
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_GET_LABEL_SORT_ORDER
 uint16_t uniffi_mail_checksum_func_get_label_sort_order(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_INITIALIZE_LOGGING
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_FUNC_INITIALIZE_LOGGING
+uint16_t uniffi_mail_checksum_func_initialize_logging(void
     
 );
 #endif
@@ -792,6 +836,12 @@ uint16_t uniffi_mail_checksum_method_mailservice_update_account_token(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_CONSTRUCTOR_MAILSERVICE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_CONSTRUCTOR_MAILSERVICE_NEW
 uint16_t uniffi_mail_checksum_constructor_mailservice_new(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_LOGCALLBACK_ON_LOG
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_LOGCALLBACK_ON_LOG
+uint16_t uniffi_mail_checksum_method_logcallback_on_log(void
     
 );
 #endif

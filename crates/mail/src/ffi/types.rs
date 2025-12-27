@@ -401,3 +401,43 @@ pub trait SyncProgressCallback: Send + Sync {
     /// Called when an error occurs during sync
     fn on_error(&self, message: String);
 }
+
+// ============================================================================
+// Log Callback
+// ============================================================================
+
+/// Log level for FFI callback
+#[derive(Debug, Clone, Copy, uniffi::Enum)]
+pub enum FfiLogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl From<log::Level> for FfiLogLevel {
+    fn from(level: log::Level) -> Self {
+        match level {
+            log::Level::Error => FfiLogLevel::Error,
+            log::Level::Warn => FfiLogLevel::Warn,
+            log::Level::Info => FfiLogLevel::Info,
+            log::Level::Debug => FfiLogLevel::Debug,
+            log::Level::Trace => FfiLogLevel::Trace,
+        }
+    }
+}
+
+/// Callback interface for receiving log messages from Rust
+///
+/// Swift should implement this using os_log/Logger for unified logging.
+#[uniffi::export(callback_interface)]
+pub trait LogCallback: Send + Sync {
+    /// Called when a log message is emitted
+    ///
+    /// # Arguments
+    /// * `level` - The log level (error, warn, info, debug, trace)
+    /// * `target` - The logging target (typically module path, e.g., "mail::sync")
+    /// * `message` - The log message
+    fn on_log(&self, level: FfiLogLevel, target: String, message: String);
+}

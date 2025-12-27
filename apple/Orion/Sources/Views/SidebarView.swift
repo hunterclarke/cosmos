@@ -106,6 +106,7 @@ struct SidebarView: View {
                     .padding(.vertical, OrionTheme.spacing2)
                 }
                 .buttonStyle(.plain)
+                .disabled(!authService.isConfigured || !mailBridge.isInitialized)
             }
         }
     }
@@ -119,7 +120,7 @@ struct SidebarView: View {
                     name: label.name,
                     icon: label.icon,
                     isSelected: selectedLabel == label.id,
-                    unreadCount: label.id == "INBOX" ? inboxUnreadCount : nil
+                    unreadCount: labelUnreadCount(for: label.id)
                 )
                 .onTapGesture {
                     selectedLabel = label.id
@@ -127,6 +128,10 @@ struct SidebarView: View {
             }
         }
         .padding(.top, OrionTheme.spacing2)
+        .task {
+            // Load label unread counts on appear
+            await mailBridge.loadLabelUnreadCounts(accountId: selectedAccountId)
+        }
     }
 
     // MARK: - Sync Footer
@@ -184,12 +189,16 @@ struct SidebarView: View {
     // MARK: - Computed Properties
 
     private var totalUnreadCount: Int {
-        Int(mailBridge.unreadCount)
+        // Use inbox unread count from cache, or fall back to current unread count
+        Int(mailBridge.labelUnreadCounts["INBOX"] ?? mailBridge.unreadCount)
     }
 
-    private var inboxUnreadCount: Int {
-        // Show the current unread count when viewing inbox
-        selectedLabel == "INBOX" ? Int(mailBridge.unreadCount) : 0
+    private func labelUnreadCount(for labelId: String) -> Int? {
+        // Return cached unread count for this label
+        if let count = mailBridge.labelUnreadCounts[labelId], count > 0 {
+            return Int(count)
+        }
+        return nil
     }
 
     // MARK: - Actions
@@ -197,6 +206,12 @@ struct SidebarView: View {
     private func addAccount() {
         guard authService.isConfigured else {
             errorMessage = "OAuth not configured. Please add google-credentials.json to ~/Library/Application Support/cosmos/"
+            showingError = true
+            return
+        }
+
+        guard mailBridge.isInitialized else {
+            errorMessage = "Mail service not initialized. Please wait..."
             showingError = true
             return
         }
@@ -213,10 +228,16 @@ struct SidebarView: View {
                 if let account = await mailBridge.addAccount(email: email) {
                     // Save tokens for this account
                     try authService.saveTokens(tokens, for: account.id)
-                    print("[SidebarView] Added account: \(email)")
+                    OrionLogger.ui.info("Added account: \(email)")
 
                     // Trigger initial sync
                     await syncAccount(account, tokens: tokens)
+
+                    // Reload threads after sync
+                    await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
+                } else {
+                    errorMessage = "Failed to register account"
+                    showingError = true
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -232,7 +253,7 @@ struct SidebarView: View {
                     let tokens = try await authService.getValidTokens(for: account.id)
                     await syncAccount(account, tokens: tokens)
                 } catch {
-                    print("[SidebarView] Failed to get tokens for \(account.email): \(error)")
+                    OrionLogger.ui.error("Failed to get tokens for \(account.email): \(error)")
                     // Continue with other accounts
                 }
             }
@@ -250,9 +271,9 @@ struct SidebarView: View {
                 clientId: authService.clientId,
                 clientSecret: authService.clientSecret
             )
-            print("[SidebarView] Synced \(account.email): \(stats.messagesFetched) messages")
+            OrionLogger.sync.info("Synced \(account.email): \(stats.messagesFetched) messages")
         } catch {
-            print("[SidebarView] Sync failed for \(account.email): \(error)")
+            OrionLogger.sync.error("Sync failed for \(account.email): \(error)")
             errorMessage = "Sync failed: \(error.localizedDescription)"
             showingError = true
         }

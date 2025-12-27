@@ -255,28 +255,49 @@ pub fn sync_gmail(
     account_id: i64,
     options: SyncOptions,
 ) -> Result<SyncStats> {
+    sync_gmail_with_progress(gmail, store, account_id, options, |_, _| {})
+}
+
+/// Sync Gmail inbox with progress callback
+///
+/// Same as `sync_gmail` but with a progress callback for UI updates.
+/// The callback receives (messages_fetched, phase_description).
+pub fn sync_gmail_with_progress<F>(
+    gmail: &GmailClient,
+    store: &dyn MailStore,
+    account_id: i64,
+    options: SyncOptions,
+    on_progress: F,
+) -> Result<SyncStats>
+where
+    F: Fn(usize, &str),
+{
     let start = std::time::Instant::now();
 
     // Check for existing sync state
     let existing_state = store.get_sync_state(account_id)?;
 
+    on_progress(0, "Checking sync state...");
+
     let mut stats = match existing_state {
         // Full resync requested - start fresh
         _ if options.full_resync => {
+            on_progress(0, "Starting full resync...");
             info!("Full resync requested, clearing existing data...");
             store.clear_mail_data()?;
             store.delete_sync_state(account_id)?;
-            initial_sync(gmail, store, account_id, &options)?
+            initial_sync_with_progress(gmail, store, account_id, &options, &on_progress)?
         }
         // Incomplete initial sync - resume it
         Some(state) if !state.initial_sync_complete => {
+            on_progress(state.messages_listed, &format!("Resuming sync ({} listed)...", state.messages_listed));
             info!(
                 "Resuming incomplete initial sync (page_token={}, messages_listed={}, failed_ids={})",
                 state.fetch_page_token.is_some(),
                 state.messages_listed,
                 state.failed_message_ids.len()
             );
-            initial_sync(gmail, store, account_id, &options)?
+            initial_sync_with_progress(gmail, store, account_id, &options, &on_progress)?
         }
         // Complete sync state - check for staleness first
         Some(state) => {
@@ -285,23 +306,26 @@ pub fn sync_gmail(
             // to avoid losing messages during the gap
             let age = chrono::Utc::now() - state.last_sync_at;
             if age.num_days() >= 5 {
+                on_progress(0, "Sync state stale, resyncing...");
                 warn!(
                     "Sync state is {} days old (history_id may expire), performing full resync",
                     age.num_days()
                 );
                 store.clear_mail_data()?;
                 store.delete_sync_state(account_id)?;
-                initial_sync(gmail, store, account_id, &options)?
+                initial_sync_with_progress(gmail, store, account_id, &options, &on_progress)?
             } else {
+                on_progress(0, "Checking for new messages...");
                 // Try incremental sync
                 match incremental_sync(gmail, store, &state, &options) {
                     Ok(stats) => stats,
                     Err(e) if e.downcast_ref::<HistoryExpiredError>().is_some() => {
                         // History ID expired, fall back to full resync
+                        on_progress(0, "History expired, resyncing...");
                         warn!("History ID expired (404/400 from Gmail), performing full resync");
                         store.clear_mail_data()?;
                         store.delete_sync_state(account_id)?;
-                        initial_sync(gmail, store, account_id, &options)?
+                        initial_sync_with_progress(gmail, store, account_id, &options, &on_progress)?
                     }
                     Err(e) => return Err(e),
                 }
@@ -309,13 +333,24 @@ pub fn sync_gmail(
         }
         // No sync state - start initial sync
         None => {
+            on_progress(0, "Starting initial sync...");
             info!("No existing sync state, starting initial sync...");
-            initial_sync(gmail, store, account_id, &options)?
+            initial_sync_with_progress(gmail, store, account_id, &options, &on_progress)?
         }
     };
 
     stats.duration_ms = start.elapsed().as_millis() as u64;
     Ok(stats)
+}
+
+/// Perform initial full sync using decoupled fetch/process phases (no progress callback)
+fn initial_sync(
+    gmail: &GmailClient,
+    store: &dyn MailStore,
+    account_id: i64,
+    options: &SyncOptions,
+) -> Result<SyncStats> {
+    initial_sync_with_progress(gmail, store, account_id, options, &|_, _| {})
 }
 
 /// Perform initial full sync using decoupled fetch/process phases
@@ -324,12 +359,17 @@ pub fn sync_gmail(
 /// Phase 2 (Process): Processes pending messages, INBOX first, then the rest
 ///
 /// After completing, runs an incremental catch-up sync for messages that arrived during sync.
-fn initial_sync(
+fn initial_sync_with_progress<F>(
     gmail: &GmailClient,
     store: &dyn MailStore,
     account_id: i64,
     options: &SyncOptions,
-) -> Result<SyncStats> {
+    on_progress: &F,
+) -> Result<SyncStats>
+where
+    F: Fn(usize, &str),
+{
+    log::debug!("initial_sync_with_progress called for account_id={}", account_id);
     let sync_start = Instant::now();
     let mut stats = SyncStats {
         was_incremental: false,
@@ -341,15 +381,18 @@ fn initial_sync(
     let existing_state = store.get_sync_state(account_id)?;
     let start_history_id = match existing_state {
         Some(state) if !state.initial_sync_complete && !state.history_id.is_empty() => {
+            log::debug!("Resuming initial sync from history_id: {}", state.history_id);
             info!("Resuming initial sync from history_id: {}", state.history_id);
             state.history_id
         }
         _ => {
             // Get history_id at START of sync so we can catch up on any
             // messages that arrive during the sync
+            log::debug!("Getting current history ID from Gmail profile...");
             let profile_start = Instant::now();
             let history_id = get_current_history_id(gmail)?;
             stats.timing.profile_ms += profile_start.elapsed().as_millis() as u64;
+            log::debug!("Got history_id: {} in {}ms", history_id, profile_start.elapsed().as_millis());
             info!("Starting initial sync from history_id: {}", history_id);
 
             // Save partial sync state to indicate initial sync is in progress
@@ -361,8 +404,11 @@ fn initial_sync(
 
     // === PHASE 1: FETCH ===
     // Download messages as fast as Gmail allows, store as pending
+    log::debug!("Phase 1: Fetching messages from Gmail...");
     info!("[SYNC] Phase 1: Fetching messages from Gmail...");
-    let fetch_stats = fetch_phase(gmail, store, account_id, options, &mut stats)?;
+    on_progress(0, "Fetching messages...");
+    let fetch_stats = fetch_phase_with_progress(gmail, store, account_id, options, &mut stats, on_progress)?;
+    log::debug!("Phase 1 complete: {} fetched, {} pending", fetch_stats.fetched, fetch_stats.pending);
     info!("[SYNC] Fetch phase complete: {} fetched, {} pending, {} skipped, {} failed",
         fetch_stats.fetched, fetch_stats.pending, fetch_stats.skipped, fetch_stats.failed_ids.len());
 
@@ -370,11 +416,12 @@ fn initial_sync(
     // Process pending messages: INBOX first, then the rest
     let pending_count = store.count_pending_messages(account_id, None)?;
     info!("[SYNC] Phase 2: Processing {} pending messages (INBOX first)...", pending_count);
+    on_progress(stats.messages_fetched, &format!("Processing {} messages...", pending_count));
 
     if pending_count == 0 {
         info!("[SYNC] No pending messages to process, skipping process phase");
     } else {
-        process_phase(store, account_id, options, &mut stats)?;
+        process_phase_with_progress(store, account_id, options, &mut stats, on_progress)?;
         info!("[SYNC] Process phase complete: {} messages created, {} threads",
             stats.messages_created, stats.threads_created + stats.threads_updated);
     }
@@ -477,6 +524,17 @@ pub struct FetchPhaseStats {
     pub failed_ids: Vec<String>,
 }
 
+/// Phase 1: Fetch messages from Gmail as fast as possible (no progress callback)
+pub fn fetch_phase(
+    gmail: &GmailClient,
+    store: &dyn MailStore,
+    account_id: i64,
+    options: &SyncOptions,
+    stats: &mut SyncStats,
+) -> Result<FetchPhaseStats> {
+    fetch_phase_with_progress(gmail, store, account_id, options, stats, &|_, _| {})
+}
+
 /// Phase 1: Fetch messages from Gmail as fast as possible
 ///
 /// Lists all message IDs, fetches full content in parallel, stores raw JSON as pending.
@@ -491,13 +549,18 @@ pub struct FetchPhaseStats {
 ///
 /// Call this from a background thread, then call `process_pending_batch` repeatedly
 /// to process messages with UI updates between batches.
-pub fn fetch_phase(
+fn fetch_phase_with_progress<F>(
     gmail: &GmailClient,
     store: &dyn MailStore,
     account_id: i64,
     options: &SyncOptions,
     stats: &mut SyncStats,
-) -> Result<FetchPhaseStats> {
+    on_progress: &F,
+) -> Result<FetchPhaseStats>
+where
+    F: Fn(usize, &str),
+{
+    log::debug!("fetch_phase_with_progress called");
     let mut fetch_stats = FetchPhaseStats {
         fetched: 0,
         pending: 0,
@@ -509,6 +572,12 @@ pub fn fetch_phase(
     let existing_state = store.get_sync_state(account_id)?;
     let (mut page_token, mut total_listed, previous_failed_ids) = match &existing_state {
         Some(state) if !state.initial_sync_complete => {
+            log::debug!(
+                "Resuming fetch from page_token={:?}, messages_listed={}, failed_ids={}",
+                state.fetch_page_token.is_some(),
+                state.messages_listed,
+                state.failed_message_ids.len()
+            );
             info!(
                 "Resuming fetch from page_token={:?}, messages_listed={}, failed_ids={}",
                 state.fetch_page_token.as_deref().map(|s| &s[..s.len().min(20)]),
@@ -563,6 +632,7 @@ pub fn fetch_phase(
         };
 
         // Fetch a page of message IDs
+        log::debug!("Listing messages (page_token={:?})...", page_token.is_some());
         let list_start = Instant::now();
         let list_response = gmail.list_messages(
             effective_batch_size,
@@ -572,12 +642,15 @@ pub fn fetch_phase(
         stats.timing.list_messages_ms += list_start.elapsed().as_millis() as u64;
 
         let message_refs = list_response.messages.unwrap_or_default();
+        log::debug!("Listed {} messages in {}ms", message_refs.len(), list_start.elapsed().as_millis());
 
         if message_refs.is_empty() {
+            log::debug!("No more messages to list");
             break;
         }
 
         total_listed += message_refs.len();
+        log::debug!("Total listed so far: {}", total_listed);
         info!(
             "Listed {} messages (batch of {})",
             total_listed,
@@ -606,6 +679,12 @@ pub fn fetch_phase(
             fetch_stats.pending += batch_result.pending;
             fetch_stats.failed_ids.extend(batch_result.failed_ids);
         }
+
+        // Report progress after each page
+        on_progress(
+            fetch_stats.fetched,
+            &format!("Fetched {} messages ({} listed)...", fetch_stats.fetched, total_listed)
+        );
 
         // Determine next page token
         let next_page_token = list_response.next_page_token;
@@ -828,17 +907,31 @@ pub fn process_pending_batch(
     Ok(result)
 }
 
-/// Phase 2: Process pending messages (INBOX first)
-///
-/// Reads pending messages from storage, normalizes them, stores as processed,
-/// computes threads, and indexes for search. INBOX messages are processed first
-/// to optimize time-to-inbox.
+/// Phase 2: Process pending messages (INBOX first) - no progress callback
 fn process_phase(
     store: &dyn MailStore,
     account_id: i64,
     options: &SyncOptions,
     stats: &mut SyncStats,
 ) -> Result<()> {
+    process_phase_with_progress(store, account_id, options, stats, &|_, _| {})
+}
+
+/// Phase 2: Process pending messages (INBOX first)
+///
+/// Reads pending messages from storage, normalizes them, stores as processed,
+/// computes threads, and indexes for search. INBOX messages are processed first
+/// to optimize time-to-inbox.
+fn process_phase_with_progress<F>(
+    store: &dyn MailStore,
+    account_id: i64,
+    options: &SyncOptions,
+    stats: &mut SyncStats,
+    on_progress: &F,
+) -> Result<()>
+where
+    F: Fn(usize, &str),
+{
     let process_batch_size = 100; // Process in batches for progress updates
     let mut threads_seen: HashSet<ThreadId> = HashSet::new();
 
@@ -928,6 +1021,13 @@ fn process_phase(
             }
             search_index_us += commit_start.elapsed().as_millis() as u64 * 1000;
         }
+
+        // Report progress after each batch
+        let remaining = store.count_pending_messages(account_id, None)?;
+        on_progress(
+            stats.messages_created,
+            &format!("Processed {} messages ({} remaining)...", stats.messages_created, remaining)
+        );
     }
 
     // Convert microseconds to milliseconds

@@ -425,6 +425,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -1957,6 +1973,95 @@ public func FfiConverterTypeFfiThreadSummary_lower(_ value: FfiThreadSummary) ->
     return FfiConverterTypeFfiThreadSummary.lower(value)
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Log level for FFI callback
+ */
+
+public enum FfiLogLevel: Equatable, Hashable {
+    
+    case error
+    case warn
+    case info
+    case debug
+    case trace
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiLogLevel: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLogLevel: FfiConverterRustBuffer {
+    typealias SwiftType = FfiLogLevel
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLogLevel {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .error
+        
+        case 2: return .warn
+        
+        case 3: return .info
+        
+        case 4: return .debug
+        
+        case 5: return .trace
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiLogLevel, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .error:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .warn:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .info:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .debug:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .trace:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLogLevel_lift(_ buf: RustBuffer) throws -> FfiLogLevel {
+    return try FfiConverterTypeFfiLogLevel.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLogLevel_lower(_ value: FfiLogLevel) -> RustBuffer {
+    return FfiConverterTypeFfiLogLevel.lower(value)
+}
+
+
 
 /**
  * FFI-friendly error type
@@ -2076,6 +2181,147 @@ public func FfiConverterTypeMailError_lift(_ buf: RustBuffer) throws -> MailErro
 #endif
 public func FfiConverterTypeMailError_lower(_ value: MailError) -> RustBuffer {
     return FfiConverterTypeMailError.lower(value)
+}
+
+
+
+
+/**
+ * Callback interface for receiving log messages from Rust
+ *
+ * Swift should implement this using os_log/Logger for unified logging.
+ */
+public protocol LogCallback: AnyObject, Sendable {
+    
+    /**
+     * Called when a log message is emitted
+     *
+     * # Arguments
+     * * `level` - The log level (error, warn, info, debug, trace)
+     * * `target` - The logging target (typically module path, e.g., "mail::sync")
+     * * `message` - The log message
+     */
+    func onLog(level: FfiLogLevel, target: String, message: String) 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceLogCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceLogCallback] = [UniffiVTableCallbackInterfaceLogCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceLogCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface LogCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceLogCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface LogCallback: handle missing in uniffiClone")
+            }
+        },
+        onLog: { (
+            uniffiHandle: UInt64,
+            level: RustBuffer,
+            target: RustBuffer,
+            message: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceLogCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onLog(
+                     level: try FfiConverterTypeFfiLogLevel_lift(level),
+                     target: try FfiConverterString.lift(target),
+                     message: try FfiConverterString.lift(message)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitLogCallback() {
+    uniffi_mail_fn_init_callback_vtable_logcallback(UniffiCallbackInterfaceLogCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceLogCallback {
+    fileprivate static let handleMap = UniffiHandleMap<LogCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceLogCallback : FfiConverter {
+    typealias SwiftType = LogCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceLogCallback_lift(_ handle: UInt64) throws -> LogCallback {
+    return try FfiConverterCallbackInterfaceLogCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceLogCallback_lower(_ v: LogCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceLogCallback.lower(v)
 }
 
 
@@ -2605,6 +2851,16 @@ public func createTokenJson(accessToken: String, refreshToken: String?, expiresA
 })
 }
 /**
+ * Disable log forwarding to the callback
+ *
+ * After this call, Rust logs will be silently dropped.
+ */
+public func disableLogging()  {try! rustCall() {
+    uniffi_mail_fn_func_disable_logging($0
+    )
+}
+}
+/**
  * Get the icon emoji for a label
  */
 public func getLabelIcon(labelId: String) -> String  {
@@ -2623,6 +2879,43 @@ public func getLabelSortOrder(labelId: String) -> UInt32  {
         FfiConverterString.lower(labelId),$0
     )
 })
+}
+/**
+ * Initialize the Rust logging system for FFI use
+ *
+ * This should be called once at app startup, before creating the MailService.
+ * It installs a log backend that routes messages to the provided callback.
+ *
+ * # Arguments
+ * * `callback` - The Swift/Kotlin object that implements LogCallback
+ * * `max_level` - Maximum log level (0=error, 1=warn, 2=info, 3=debug, 4=trace)
+ *
+ * # Example (Swift)
+ * ```swift
+ * class SwiftLogCallback: LogCallback {
+ * private let logger = Logger(subsystem: "com.cosmos.orion", category: "Rust")
+ *
+ * func onLog(level: FfiLogLevel, target: String, message: String) {
+ * switch level {
+ * case .error: logger.error("[\(target)] \(message)")
+ * case .warn:  logger.warning("[\(target)] \(message)")
+ * case .info:  logger.info("[\(target)] \(message)")
+ * case .debug: logger.debug("[\(target)] \(message)")
+ * case .trace: logger.trace("[\(target)] \(message)")
+ * }
+ * }
+ * }
+ *
+ * // At app startup
+ * initializeLogging(callback: SwiftLogCallback(), maxLevel: 2)  // info level
+ * ```
+ */
+public func initializeLogging(callback: LogCallback, maxLevel: UInt8)  {try! rustCall() {
+    uniffi_mail_fn_func_initialize_logging(
+        FfiConverterCallbackInterfaceLogCallback_lower(callback),
+        FfiConverterUInt8.lower(maxLevel),$0
+    )
+}
 }
 /**
  * Parse a search query and return the parsed structure
@@ -2655,10 +2948,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mail_checksum_func_create_token_json() != 14543) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mail_checksum_func_disable_logging() != 51805) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mail_checksum_func_get_label_icon() != 58784) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_func_get_label_sort_order() != 10455) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mail_checksum_func_initialize_logging() != 23175) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_func_parse_search_query() != 14918) {
@@ -2721,6 +3020,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mail_checksum_constructor_mailservice_new() != 46380) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mail_checksum_method_logcallback_on_log() != 36044) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mail_checksum_method_syncprogresscallback_on_progress() != 9898) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2728,6 +3030,7 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitLogCallback()
     uniffiCallbackInitSyncProgressCallback()
     return InitializationResult.ok
 }()

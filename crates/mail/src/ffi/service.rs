@@ -256,6 +256,8 @@ impl MailService {
         client_secret: String,
         callback: Box<dyn SyncProgressCallback>,
     ) -> Result<FfiSyncStats, MailError> {
+        log::debug!("sync_account called for account_id={}", account_id);
+
         // Create a GmailClient with the provided token
         let auth = GmailAuth::with_token_data(client_id, client_secret, Some(token_json));
         let gmail = GmailClient::new(auth);
@@ -270,14 +272,27 @@ impl MailService {
         // Notify starting
         callback.on_progress(0, None, "Starting sync...".to_string());
 
-        // Run sync
-        let stats = crate::sync::sync_gmail(&gmail, self.store.as_ref(), account_id, options)
-            .map_err(|e| {
-                callback.on_error(e.to_string());
-                MailError::Sync {
-                    message: e.to_string(),
-                }
-            })?;
+        // Run sync with progress updates
+        // Phase 1: Fetch messages
+        callback.on_progress(0, None, "Fetching messages...".to_string());
+
+        let stats = crate::sync::sync_gmail_with_progress(
+            &gmail,
+            self.store.as_ref(),
+            account_id,
+            options,
+            |fetched, phase| {
+                callback.on_progress(fetched as u32, None, phase.to_string());
+            }
+        ).map_err(|e| {
+            log::error!("sync_gmail error: {}", e);
+            callback.on_error(e.to_string());
+            MailError::Sync {
+                message: e.to_string(),
+            }
+        })?;
+
+        log::debug!("sync_gmail completed: {} messages fetched", stats.messages_fetched);
 
         // Notify completion
         callback.on_progress(
@@ -462,4 +477,61 @@ pub fn create_token_json(
         expires_at,
     };
     serde_json::to_string(&token).unwrap_or_else(|_| "{}".to_string())
+}
+
+// ============================================================================
+// Logging
+// ============================================================================
+
+/// Initialize the Rust logging system for FFI use
+///
+/// This should be called once at app startup, before creating the MailService.
+/// It installs a log backend that routes messages to the provided callback.
+///
+/// # Arguments
+/// * `callback` - The Swift/Kotlin object that implements LogCallback
+/// * `max_level` - Maximum log level (0=error, 1=warn, 2=info, 3=debug, 4=trace)
+///
+/// # Example (Swift)
+/// ```swift
+/// class SwiftLogCallback: LogCallback {
+///     private let logger = Logger(subsystem: "com.cosmos.orion", category: "Rust")
+///
+///     func onLog(level: FfiLogLevel, target: String, message: String) {
+///         switch level {
+///         case .error: logger.error("[\(target)] \(message)")
+///         case .warn:  logger.warning("[\(target)] \(message)")
+///         case .info:  logger.info("[\(target)] \(message)")
+///         case .debug: logger.debug("[\(target)] \(message)")
+///         case .trace: logger.trace("[\(target)] \(message)")
+///         }
+///     }
+/// }
+///
+/// // At app startup
+/// initializeLogging(callback: SwiftLogCallback(), maxLevel: 2)  // info level
+/// ```
+#[uniffi::export]
+pub fn initialize_logging(callback: Box<dyn LogCallback>, max_level: u8) {
+    let level = match max_level {
+        0 => log::Level::Error,
+        1 => log::Level::Warn,
+        2 => log::Level::Info,
+        3 => log::Level::Debug,
+        _ => log::Level::Trace,
+    };
+
+    // Initialize the logger (only succeeds on first call)
+    let _ = crate::ffi::logging::init_ffi_logger(level);
+
+    // Set the callback (can be called multiple times)
+    crate::ffi::logging::set_log_callback(Some(std::sync::Arc::from(callback)));
+}
+
+/// Disable log forwarding to the callback
+///
+/// After this call, Rust logs will be silently dropped.
+#[uniffi::export]
+pub fn disable_logging() {
+    crate::ffi::logging::set_log_callback(None);
 }

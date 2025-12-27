@@ -87,5 +87,7 @@ echo ""
 echo "Installing on simulator..."
 xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
 
-echo "Launching Orion..."
-xcrun simctl launch "$SIMULATOR_UDID" com.cosmos.Orion
+echo "Launching Orion (logs will stream to this terminal)..."
+echo "Press Ctrl+C to stop"
+echo ""
+xcrun simctl launch --console-pty "$SIMULATOR_UDID" com.orion.mail

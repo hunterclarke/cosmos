@@ -15,8 +15,19 @@ class AuthService: NSObject, ObservableObject, ASWebAuthenticationPresentationCo
     /// OAuth client secret
     private(set) var clientSecret: String = ""
 
-    /// OAuth redirect URI
-    private let redirectUri = "com.orion.mail://oauth"
+    /// OAuth redirect URI - uses reverse client ID format for iOS compatibility
+    /// Google automatically allows this scheme without manual registration
+    private var redirectUri: String {
+        // Extract the numeric part from client ID (e.g., "123456789-abc.apps.googleusercontent.com" -> "123456789-abc")
+        let clientIdPrefix = clientId.replacingOccurrences(of: ".apps.googleusercontent.com", with: "")
+        return "com.googleusercontent.apps.\(clientIdPrefix):/oauthredirect"
+    }
+
+    /// Callback URL scheme for ASWebAuthenticationSession
+    private var callbackScheme: String {
+        let clientIdPrefix = clientId.replacingOccurrences(of: ".apps.googleusercontent.com", with: "")
+        return "com.googleusercontent.apps.\(clientIdPrefix)"
+    }
 
     /// Gmail API scope
     private let scope = "https://www.googleapis.com/auth/gmail.modify"
@@ -48,15 +59,15 @@ class AuthService: NSObject, ObservableObject, ASWebAuthenticationPresentationCo
         guard let clientId = Bundle.main.object(forInfoDictionaryKey: "GoogleClientID") as? String,
               let clientSecret = Bundle.main.object(forInfoDictionaryKey: "GoogleClientSecret") as? String,
               !clientId.isEmpty, !clientSecret.isEmpty else {
-            print("[AuthService] OAuth credentials not configured in build settings")
-            print("[AuthService] Run ./script/setup-credentials to configure")
+            OrionLogger.auth.warning("OAuth credentials not configured in build settings")
+            OrionLogger.auth.info("Run ./script/setup-credentials to configure")
             return
         }
 
         self.clientId = clientId
         self.clientSecret = clientSecret
         self.isConfigured = true
-        print("[AuthService] Loaded OAuth credentials from bundle")
+        OrionLogger.auth.info("Loaded OAuth credentials from bundle")
     }
 
     // MARK: - Authentication
@@ -74,10 +85,11 @@ class AuthService: NSObject, ObservableObject, ASWebAuthenticationPresentationCo
         let authUrl = buildAuthorizationUrl(codeChallenge: codeChallenge)
 
         // Present web authentication session
+        let scheme = callbackScheme
         let callbackUrl = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
             let session = ASWebAuthenticationSession(
                 url: authUrl,
-                callbackURLScheme: "com.orion.mail"
+                callbackURLScheme: scheme
             ) { url, error in
                 if let error = error {
                     continuation.resume(throwing: error)

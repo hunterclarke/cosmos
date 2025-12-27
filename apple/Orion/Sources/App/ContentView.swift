@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var isSearching: Bool = false
     @State private var isSearchEditing: Bool = false
     @State private var showShortcutsHelp: Bool = false
+    @State private var showingError: Bool = false
+    @State private var errorMessage: String = ""
 
     // iPhone tab selection
     @State private var selectedTab: Tab = .inbox
@@ -24,6 +26,9 @@ struct ContentView: View {
     @State private var selectedThreadIndex: Int = 0
     @State private var pendingGSequence: Bool = false
     @FocusState private var isContentFocused: Bool
+
+    // Background sync polling
+    @State private var pollTask: Task<Void, Never>? = nil
 
     // Standard Gmail labels
     static let labels: [(id: String, name: String, icon: String)] = [
@@ -62,6 +67,13 @@ struct ContentView: View {
             Task {
                 await mailBridge.initialize()
             }
+            // Start background sync polling
+            startPolling()
+        }
+        .onDisappear {
+            // Cancel polling when view disappears
+            pollTask?.cancel()
+            pollTask = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
             showShortcutsHelp.toggle()
@@ -77,6 +89,11 @@ struct ContentView: View {
         // Reset selected index when threads change
         .onChange(of: mailBridge.threads) { _, _ in
             selectedThreadIndex = 0
+        }
+        .alert("Error", isPresented: $showingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage)
         }
     }
 
@@ -102,7 +119,13 @@ struct ContentView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .principal) {
-                        labelPicker
+                        HStack(spacing: 8) {
+                            labelPicker
+                            if mailBridge.isSyncing {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                            }
+                        }
                     }
                 }
                 .navigationDestination(item: $selectedThread) { thread in
@@ -240,7 +263,7 @@ struct ContentView: View {
                         Text("Add Account")
                     }
                 }
-                .disabled(!authService.isConfigured)
+                .disabled(!authService.isConfigured || !mailBridge.isInitialized)
 
                 Button {
                     syncAllAccounts()
@@ -250,7 +273,7 @@ struct ContentView: View {
                         Text(mailBridge.isSyncing ? "Syncing..." : "Sync All")
                     }
                 }
-                .disabled(mailBridge.isSyncing || !authService.isConfigured || mailBridge.accounts.isEmpty)
+                .disabled(mailBridge.isSyncing || !authService.isConfigured || mailBridge.accounts.isEmpty || !mailBridge.isInitialized)
             }
 
             // Settings section
@@ -289,9 +312,18 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // Top bar with title and search
                 HStack {
-                    Text(currentLabelTitle)
-                        .font(.system(size: OrionTheme.textLg, weight: .semibold))
-                        .foregroundColor(OrionTheme.foreground)
+                    HStack(spacing: OrionTheme.spacing2) {
+                        Text(currentLabelTitle)
+                            .font(.system(size: OrionTheme.textLg, weight: .semibold))
+                            .foregroundColor(OrionTheme.foreground)
+
+                        // Subtle sync indicator
+                        if mailBridge.isSyncing {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .help("Syncing...")
+                        }
+                    }
 
                     Spacer()
 
@@ -515,7 +547,7 @@ struct ContentView: View {
                 }
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Archive failed: \(error)")
+                OrionLogger.ui.error("Archive failed: \(error)")
             }
         }
     }
@@ -533,7 +565,7 @@ struct ContentView: View {
                 )
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Star failed: \(error)")
+                OrionLogger.ui.error("Star failed: \(error)")
             }
         }
     }
@@ -552,14 +584,70 @@ struct ContentView: View {
                 )
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Toggle read failed: \(error)")
+                OrionLogger.ui.error("Toggle read failed: \(error)")
             }
         }
     }
 
     private func trashSelected() {
-        // TODO: Implement trash action when available in MailBridge
-        print("[ContentView] Trash not yet implemented")
+        guard let thread = selectedThread ?? currentThread else { return }
+        Task {
+            do {
+                let tokens = try await authService.getValidTokens(for: thread.accountId)
+                try await mailBridge.trashThread(
+                    threadId: thread.id,
+                    tokenJson: tokens.toTokenJson(),
+                    clientId: authService.clientId,
+                    clientSecret: authService.clientSecret
+                )
+                // Move to next thread or go back to list
+                if selectedThread != nil {
+                    selectedThread = nil
+                }
+                await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
+            } catch {
+                OrionLogger.ui.error("Trash failed: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Background Sync Polling
+
+    private func startPolling() {
+        pollTask = Task {
+            while !Task.isCancelled {
+                // Wait 60 seconds between syncs
+                try? await Task.sleep(for: .seconds(60))
+
+                // Skip if cancelled or already syncing
+                guard !Task.isCancelled, !mailBridge.isSyncing else { continue }
+
+                // Check cooldown (MailBridge enforces this too, but avoid unnecessary work)
+                guard mailBridge.canSync else { continue }
+
+                // Sync all accounts
+                await syncAllAccountsInBackground()
+            }
+        }
+    }
+
+    private func syncAllAccountsInBackground() async {
+        for account in mailBridge.accounts {
+            do {
+                let tokens = try await authService.getValidTokens(for: account.id)
+                let _ = try await mailBridge.syncAccount(
+                    accountId: account.id,
+                    tokenJson: tokens.toTokenJson(),
+                    clientId: authService.clientId,
+                    clientSecret: authService.clientSecret
+                )
+            } catch {
+                // Silently log errors during background sync
+                OrionLogger.sync.error("Background sync failed for \(account.email): \(error)")
+            }
+        }
+        // Refresh thread list after background sync
+        await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
     }
 
     // MARK: - Thread Actions (for swipe gestures)
@@ -576,7 +664,7 @@ struct ContentView: View {
                 )
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Archive failed: \(error)")
+                OrionLogger.ui.error("Archive failed: \(error)")
             }
         }
     }
@@ -593,7 +681,7 @@ struct ContentView: View {
                 )
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Star failed: \(error)")
+                OrionLogger.ui.error("Star failed: \(error)")
             }
         }
     }
@@ -611,7 +699,7 @@ struct ContentView: View {
                 )
                 await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
             } catch {
-                print("[ContentView] Toggle read failed: \(error)")
+                OrionLogger.ui.error("Toggle read failed: \(error)")
             }
         }
     }
@@ -619,7 +707,7 @@ struct ContentView: View {
     // MARK: - Account Actions (for iPhone layout)
 
     private func addAccount() {
-        guard authService.isConfigured else { return }
+        guard authService.isConfigured, mailBridge.isInitialized else { return }
 
         Task {
             do {
@@ -628,19 +716,34 @@ struct ContentView: View {
 
                 if let account = await mailBridge.addAccount(email: email) {
                     try authService.saveTokens(tokens, for: account.id)
-                    print("[ContentView] Added account: \(email)")
+                    OrionLogger.ui.info("Added account: \(email)")
+
+                    // Switch to inbox tab to show sync progress (iOS)
+                    #if os(iOS)
+                    if horizontalSizeClass == .compact {
+                        selectedTab = .inbox
+                    }
+                    #endif
 
                     // Trigger initial sync
+                    let tokenJson = tokens.toTokenJson()
+                    OrionLogger.auth.debug("Token JSON: \(tokenJson)")
+                    OrionLogger.auth.debug("Token expires at: \(tokens.expiresAt), now: \(Date())")
                     let _ = try await mailBridge.syncAccount(
                         accountId: account.id,
-                        tokenJson: tokens.toTokenJson(),
+                        tokenJson: tokenJson,
                         clientId: authService.clientId,
                         clientSecret: authService.clientSecret
                     )
                     await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
+                } else {
+                    errorMessage = "Failed to register account"
+                    showingError = true
                 }
             } catch {
-                print("[ContentView] Add account failed: \(error)")
+                errorMessage = error.localizedDescription
+                showingError = true
+                OrionLogger.ui.error("Add account failed: \(error)")
             }
         }
     }
@@ -657,7 +760,7 @@ struct ContentView: View {
                         clientSecret: authService.clientSecret
                     )
                 } catch {
-                    print("[ContentView] Sync failed for \(account.email): \(error)")
+                    OrionLogger.sync.error("Sync failed for \(account.email): \(error)")
                 }
             }
             await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)

@@ -7,6 +7,9 @@
 //! ```swift
 //! import MailFFI
 //!
+//! // Initialize logging first
+//! initializeLogging(callback: myLogCallback, maxLevel: 2)
+//!
 //! // Initialize the mail service
 //! let service = try MailService(
 //!     dbPath: "/path/to/mail.db",
@@ -32,9 +35,11 @@
 //! )
 //! ```
 
+mod logging;
 mod service;
 mod types;
 
 // Re-export all FFI types and the MailService
+pub use logging::{init_ffi_logger, set_log_callback, set_log_level};
 pub use service::*;
 pub use types::*;

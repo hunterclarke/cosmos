@@ -262,6 +262,46 @@ The script builds for:
 - iOS: arm64
 - iOS Simulator: arm64, x86_64
 
+### Unified Logging System
+
+The project uses a cross-platform logging system that works across both GPUI and SwiftUI targets.
+
+**Rust side:**
+- Uses the `log` crate facade for all logging
+- GPUI app: Uses `env_logger` (configured in `main.rs`)
+- SwiftUI app: FFI callback routes logs to Swift via `LogCallback` trait
+
+**Swift side:**
+- Uses Apple's `os_log` / `Logger` for unified logging
+- `OrionLogger` provides category-based logging (`mailBridge`, `auth`, `sync`, `ui`)
+- Rust logs appear in Console.app via FFI callback
+
+**Key files:**
+- `crates/mail/src/ffi/logging.rs` - FFI log backend implementation
+- `crates/mail/src/ffi/types.rs` - `LogCallback` trait and `FfiLogLevel` enum
+- `apple/Orion/Sources/Services/RustLogger.swift` - Swift `LogCallback` implementation
+- `apple/Orion/Sources/Services/OrionLogger.swift` - Swift logging helper
+
+**Usage in Rust:**
+```rust
+log::info!("Sync completed: {} messages", count);
+log::debug!("Token refreshed successfully");
+log::error!("Failed to connect: {}", error);
+```
+
+**Usage in Swift:**
+```swift
+OrionLogger.sync.info("Sync completed")
+OrionLogger.auth.error("Token expired: \(error)")
+OrionLogger.ui.debug("Loading threads...")
+```
+
+**Initialization:**
+```swift
+// In OrionApp.swift init()
+initializeRustLogging(debug: true)  // Enable debug logs
+```
+
 ### SwiftUI Orion App
 
 Located in `apple/Orion/`, this is a universal SwiftUI app (macOS + iOS) that uses the UniFFI bindings.
@@ -635,3 +675,47 @@ Credentials are automatically embedded via xcconfig at build time. Just build in
 - `~/Library/Application Support/cosmos/mail.blobs/` - Blob storage for message bodies
 - `~/Library/Application Support/cosmos/mail.search.idx/` - Tantivy search index directory
 - `~/Library/Application Support/cosmos/gmail-tokens-{email}.json` - Per-account OAuth tokens
+
+## Cross-Platform Feature Parity
+
+**CRITICAL: All user-facing functionality must be implemented across ALL app targets.**
+
+When adding new features, ensure they are implemented in:
+1. **GPUI Orion** (`crates/apps/orion/`) - Desktop app for macOS, Linux, Windows
+2. **SwiftUI Orion** (`apple/Orion/`) - Native app for macOS and iOS
+
+### Shared Business Logic
+
+**All business logic MUST live in the `mail` crate.** Both GPUI and SwiftUI apps should:
+- Call the same `mail` crate functions for all email operations
+- Share data models, storage, sync engine, and actions
+- Never duplicate business logic in UI code
+
+**Pattern for new features:**
+1. Implement core logic in `crates/mail/src/` (e.g., new action, query, or sync behavior)
+2. If Swift needs access, expose via FFI in `crates/mail/src/ffi/`
+3. Rebuild XCFramework: `./script/build-xcframework`
+4. Add UI in both GPUI (`crates/apps/orion/`) and SwiftUI (`apple/Orion/`)
+5. Ensure feature parity in both apps before merging
+
+### Feature Parity Checklist
+
+Before completing any user-facing feature, verify:
+- [ ] Implemented in GPUI Orion
+- [ ] Implemented in SwiftUI Orion (macOS)
+- [ ] Implemented in SwiftUI Orion (iOS) if applicable
+- [ ] Uses shared business logic from `mail` crate
+- [ ] FFI bindings updated if needed
+- [ ] XCFramework rebuilt and tested
+
+### Current App Targets
+
+| Target | Platform | UI Framework | Location |
+|--------|----------|--------------|----------|
+| Orion (GPUI) | macOS, Linux, Windows | GPUI | `crates/apps/orion/` |
+| Orion (SwiftUI) | macOS | SwiftUI | `apple/Orion/` |
+| Orion (SwiftUI) | iOS | SwiftUI | `apple/Orion/` |
+
+All targets share the `mail` crate for business logic via:
+- Direct Rust calls (GPUI)
+- UniFFI bindings via `MailService` (SwiftUI)

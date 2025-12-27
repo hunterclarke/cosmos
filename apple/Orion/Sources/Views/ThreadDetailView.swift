@@ -74,10 +74,27 @@ struct ThreadDetailView: View {
         #endif
         .task {
             await loadThreadDetail()
-            // isStarred would need to be fetched from thread detail or labels
-            // For now, default to false since FfiThreadSummary doesn't include star status
-            isStarred = false
+
+            // Set star state from message labels (FfiMessage includes labelIds)
+            isStarred = threadDetail?.messages.contains { $0.labelIds.contains("STARRED") } ?? false
             isRead = !thread.isUnread
+
+            // Auto-mark as read if currently unread
+            if thread.isUnread {
+                do {
+                    let tokens = try await authService.getValidTokens(for: thread.accountId)
+                    try await mailBridge.setRead(
+                        threadId: thread.id,
+                        isRead: true,
+                        tokenJson: tokens.toTokenJson(),
+                        clientId: authService.clientId,
+                        clientSecret: authService.clientSecret
+                    )
+                    isRead = true
+                } catch {
+                    OrionLogger.ui.error("Auto-mark read failed: \(error)")
+                }
+            }
         }
         .alert("Error", isPresented: $showingError) {
             Button("OK", role: .cancel) { }
@@ -148,7 +165,7 @@ struct ThreadDetailView: View {
 
             // Trash
             Button {
-                // TODO: Implement delete
+                Task { await trashThread() }
             } label: {
                 VStack(spacing: 4) {
                     Image(systemName: "trash")
@@ -219,7 +236,7 @@ struct ThreadDetailView: View {
             }
 
             ActionButton(icon: "trash", tooltip: "Delete (#)") {
-                // TODO: Implement delete
+                await trashThread()
             }
             .keyboardShortcut("#", modifiers: [])
         }
@@ -284,6 +301,23 @@ struct ThreadDetailView: View {
             isRead = newReadState
         } catch {
             errorMessage = "Read toggle failed: \(error.localizedDescription)"
+            showingError = true
+        }
+    }
+
+    private func trashThread() async {
+        do {
+            let tokens = try await getTokensForThread()
+            try await mailBridge.trashThread(
+                threadId: thread.id,
+                tokenJson: tokens.toTokenJson(),
+                clientId: authService.clientId,
+                clientSecret: authService.clientSecret
+            )
+            // Go back to list after trashing
+            onBack()
+        } catch {
+            errorMessage = "Trash failed: \(error.localizedDescription)"
             showingError = true
         }
     }
@@ -408,12 +442,9 @@ struct MessageCard: View {
     @ViewBuilder
     private var messageBody: some View {
         if let html = message.bodyHtml, !html.isEmpty {
-            // For HTML content, we'd use WKWebView via UIViewRepresentable/NSViewRepresentable
-            // For now, fall back to text
-            Text(message.bodyText ?? message.bodyPreview)
-                .font(.system(size: OrionTheme.textSm))
-                .foregroundColor(OrionTheme.foreground)
-                .textSelection(.enabled)
+            // Render HTML content with WKWebView
+            MessageWebView(html: html)
+                .frame(minHeight: 100, maxHeight: 600)
         } else if let text = message.bodyText, !text.isEmpty {
             Text(text)
                 .font(.system(size: OrionTheme.textSm))

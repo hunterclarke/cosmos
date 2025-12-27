@@ -10,7 +10,37 @@ struct SearchResultsView: View {
     @State private var selectedResultId: String? = nil
     @State private var hoveredResultId: String? = nil
 
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var body: some View {
+        VStack(spacing: 0) {
+            // Show empty state if no query
+            if trimmedQuery.isEmpty {
+                emptyQueryView
+            } else {
+                searchResultsContent
+            }
+        }
+        .task {
+            guard !trimmedQuery.isEmpty else { return }
+            await mailBridge.search(query: trimmedQuery)
+        }
+        .onChange(of: query) { _, newQuery in
+            let trimmed = newQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                // Clear results when query is empty
+                mailBridge.searchResults = []
+                return
+            }
+            Task {
+                await mailBridge.search(query: trimmed)
+            }
+        }
+    }
+
+    private var searchResultsContent: some View {
         VStack(spacing: 0) {
             // Search header
             HStack {
@@ -18,7 +48,7 @@ struct SearchResultsView: View {
                     .font(.system(size: OrionTheme.textSm))
                     .foregroundColor(OrionTheme.mutedForeground)
 
-                Text("\"\(query)\"")
+                Text("\"\(trimmedQuery)\"")
                     .font(.system(size: OrionTheme.textSm, weight: .medium))
                     .foregroundColor(OrionTheme.foreground)
 
@@ -67,14 +97,26 @@ struct SearchResultsView: View {
                 }
             }
         }
-        .task {
-            await mailBridge.search(query: query)
+    }
+
+    private var emptyQueryView: some View {
+        VStack(spacing: OrionTheme.spacing3) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 48))
+                .foregroundColor(OrionTheme.mutedForeground)
+
+            Text("Search your emails")
+                .font(.system(size: OrionTheme.textLg))
+                .foregroundColor(OrionTheme.foreground)
+
+            Text("Enter keywords, sender names, or use operators like from:, to:, is:unread")
+                .font(.system(size: OrionTheme.textSm))
+                .foregroundColor(OrionTheme.mutedForeground)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, OrionTheme.spacing4)
         }
-        .onChange(of: query) { _, newQuery in
-            Task {
-                await mailBridge.search(query: newQuery)
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(OrionTheme.background)
     }
 
     private var noResultsView: some View {

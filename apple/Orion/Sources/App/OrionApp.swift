@@ -9,6 +9,17 @@ struct OrionApp: App {
     /// Shared authentication service
     @StateObject private var authService = AuthService()
 
+    init() {
+        // Initialize Rust logging before any Rust code runs
+        #if DEBUG
+        initializeRustLogging(debug: true)
+        #else
+        initializeRustLogging(debug: false)
+        #endif
+
+        OrionLogger.app.info("Orion app initializing")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

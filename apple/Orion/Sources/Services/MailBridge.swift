@@ -27,6 +27,7 @@ class MailBridge: ObservableObject {
 
     @Published var totalCount: UInt32 = 0
     @Published var unreadCount: UInt32 = 0
+    @Published var labelUnreadCounts: [String: UInt32] = [:]
 
     @Published var isLoading: Bool = false
     @Published var isSyncing: Bool = false
@@ -39,6 +40,14 @@ class MailBridge: ObservableObject {
 
     private var service: MailService? = nil
     private let backgroundQueue = DispatchQueue(label: "com.orion.mail", qos: .userInitiated)
+    private var lastSyncAt: Date? = nil
+    private let syncCooldown: TimeInterval = 30  // 30 seconds minimum between syncs
+
+    /// Whether a sync can be started (respects cooldown)
+    var canSync: Bool {
+        guard let lastSync = lastSyncAt else { return true }
+        return Date().timeIntervalSince(lastSync) >= syncCooldown
+    }
 
     // MARK: - Initialization
 
@@ -47,15 +56,6 @@ class MailBridge: ObservableObject {
         guard !isInitialized else { return }
 
         let paths = getDataPaths()
-
-        // Check if database exists
-        let dbExists = FileManager.default.fileExists(atPath: paths.dbPath)
-        if !dbExists {
-            print("[MailBridge] No database found at \(paths.dbPath)")
-            print("[MailBridge] Run the GPUI app first to sync some data")
-            isInitialized = true
-            return
-        }
 
         do {
             // Initialize on background queue since it may do I/O
@@ -76,14 +76,14 @@ class MailBridge: ObservableObject {
 
             self.service = svc
             self.isInitialized = true
-            print("[MailBridge] Initialized with db: \(paths.dbPath)")
+            OrionLogger.mailBridge.info("Initialized with db: \(paths.dbPath)")
 
             // Load initial data
             await loadAccounts()
 
         } catch {
             self.error = "Failed to initialize mail service: \(error.localizedDescription)"
-            print("[MailBridge] Init error: \(error)")
+            OrionLogger.mailBridge.error("Init error: \(error)")
         }
     }
 
@@ -104,10 +104,10 @@ class MailBridge: ObservableObject {
                 }
             }
             self.accounts = accts
-            print("[MailBridge] Loaded \(accts.count) accounts")
+            OrionLogger.mailBridge.info("Loaded \(accts.count) accounts")
         } catch {
             self.error = "Failed to load accounts: \(error.localizedDescription)"
-            print("[MailBridge] Load accounts error: \(error)")
+            OrionLogger.mailBridge.error("Load accounts error: \(error)")
         }
     }
 
@@ -162,10 +162,10 @@ class MailBridge: ObservableObject {
             self.threads = result.threads
             self.totalCount = result.total
             self.unreadCount = result.unread
-            print("[MailBridge] Loaded \(result.threads.count) threads (total: \(result.total), unread: \(result.unread))")
+            OrionLogger.mailBridge.info("Loaded \(result.threads.count) threads (total: \(result.total), unread: \(result.unread))")
         } catch {
             self.error = "Failed to load threads: \(error.localizedDescription)"
-            print("[MailBridge] Load threads error: \(error)")
+            OrionLogger.mailBridge.error("Load threads error: \(error)")
         }
     }
 
@@ -187,7 +187,7 @@ class MailBridge: ObservableObject {
             return detail
         } catch {
             self.error = "Failed to load thread detail: \(error.localizedDescription)"
-            print("[MailBridge] Load thread detail error: \(error)")
+            OrionLogger.mailBridge.error("Load thread detail error: \(error)")
             return nil
         }
     }
@@ -216,10 +216,10 @@ class MailBridge: ObservableObject {
                 }
             }
             self.searchResults = results
-            print("[MailBridge] Search returned \(results.count) results")
+            OrionLogger.mailBridge.info("Search returned \(results.count) results")
         } catch {
             self.error = "Search failed: \(error.localizedDescription)"
-            print("[MailBridge] Search error: \(error)")
+            OrionLogger.mailBridge.error("Search error: \(error)")
         }
     }
 
@@ -233,17 +233,39 @@ class MailBridge: ObservableObject {
             throw MailError.InvalidArgument(message: "MailService not initialized")
         }
 
+        // Check sync cooldown
+        if !canSync {
+            OrionLogger.mailBridge.info("Sync skipped - cooldown not elapsed")
+            throw MailError.InvalidArgument(message: "Sync cooldown - please wait before syncing again")
+        }
+
         isSyncing = true
         syncProgress = SyncProgress(phase: "Starting sync...", fetched: 0, total: nil)
+        OrionLogger.sync.info("Starting sync for account \(accountId)")
         defer {
             isSyncing = false
             syncProgress = nil
         }
 
-        // Create a callback for progress updates
+        // Track last refresh to throttle during sync (use class for reference semantics)
+        let refreshTracker = SyncRefreshTracker()
+        let refreshInterval: UInt32 = 100  // Refresh every 100 messages processed
+
+        // Create a callback for progress updates that also refreshes the thread list
         let callback = SwiftSyncProgressCallback { [weak self] fetched, total, phase in
             Task { @MainActor in
-                self?.syncProgress = SyncProgress(phase: phase, fetched: fetched, total: total)
+                guard let self = self else { return }
+                self.syncProgress = SyncProgress(phase: phase, fetched: fetched, total: total)
+
+                // Refresh thread list periodically during "Processing" phase
+                // This shows emails as they are ingested
+                if phase.contains("Processed") || phase.contains("Processing") {
+                    if fetched >= refreshTracker.lastCount + refreshInterval {
+                        refreshTracker.lastCount = fetched
+                        // Load threads in background to show new emails
+                        await self.loadThreads(label: "INBOX", accountId: nil)
+                    }
+                }
             }
         }
 
@@ -264,8 +286,13 @@ class MailBridge: ObservableObject {
             }
         }
 
+        // Update sync timestamp
+        lastSyncAt = Date()
+        OrionLogger.sync.info("Completed - threads: \(stats.threadsCreated), messages: \(stats.messagesCreated), duration: \(stats.durationMs)ms")
+
         // Reload data after sync
         await loadAccounts()
+        await loadLabelUnreadCounts(accountId: nil)
 
         return stats
     }
@@ -339,6 +366,94 @@ class MailBridge: ObservableObject {
         }
     }
 
+    func trashThread(threadId: String, tokenJson: String, clientId: String, clientSecret: String) async throws {
+        guard let service = service else {
+            throw MailError.InvalidArgument(message: "MailService not initialized")
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            backgroundQueue.async {
+                do {
+                    try service.trashThread(
+                        threadId: threadId,
+                        tokenJson: tokenJson,
+                        clientId: clientId,
+                        clientSecret: clientSecret
+                    )
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    // MARK: - Sync State
+
+    /// Get the current sync state for an account
+    /// Returns nil if the account has never been synced
+    func getSyncState(accountId: Int64) async -> FfiSyncState? {
+        guard let service = service else { return nil }
+
+        do {
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<FfiSyncState?, Error>) in
+                backgroundQueue.async {
+                    do {
+                        let result = try service.getSyncState(accountId: accountId)
+                        continuation.resume(returning: result)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } catch {
+            OrionLogger.mailBridge.error("Get sync state error: \(error)")
+            return nil
+        }
+    }
+
+    /// Check if any accounts have incomplete syncs that need resuming
+    func checkForIncompleteSyncs() async -> [(FfiAccount, FfiSyncState)] {
+        var incomplete: [(FfiAccount, FfiSyncState)] = []
+
+        for account in accounts {
+            if let state = await getSyncState(accountId: account.id) {
+                // If initial sync is not complete, this account needs resuming
+                if !state.initialSyncComplete {
+                    incomplete.append((account, state))
+                }
+            }
+        }
+
+        return incomplete
+    }
+
+    // MARK: - Label Counts
+
+    /// Load unread counts for all labels
+    func loadLabelUnreadCounts(accountId: Int64?) async {
+        guard let service = service else { return }
+
+        let labels = ["INBOX", "STARRED", "SENT", "DRAFT", "ALL", "SPAM", "TRASH"]
+        for label in labels {
+            do {
+                let count = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt32, Error>) in
+                    backgroundQueue.async {
+                        do {
+                            let result = try service.countUnread(label: label, accountId: accountId)
+                            continuation.resume(returning: result)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+                labelUnreadCounts[label] = count
+            } catch {
+                OrionLogger.mailBridge.error("Count unread error for \(label): \(error)")
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func getDataPaths() -> (dbPath: String, blobPath: String, searchPath: String) {
@@ -382,6 +497,11 @@ struct SyncProgress {
     let total: UInt32?
 }
 
+/// Tracks sync refresh state with reference semantics for closure capture
+private class SyncRefreshTracker: @unchecked Sendable {
+    var lastCount: UInt32 = 0
+}
+
 // MARK: - Sync Progress Callback
 
 final class SwiftSyncProgressCallback: SyncProgressCallback, @unchecked Sendable {
@@ -392,10 +512,15 @@ final class SwiftSyncProgressCallback: SyncProgressCallback, @unchecked Sendable
     }
 
     func onProgress(fetched: UInt32, total: UInt32?, phase: String) {
+        if let total = total {
+            OrionLogger.sync.info("\(phase): \(fetched)/\(total)")
+        } else {
+            OrionLogger.sync.info("\(phase): \(fetched) fetched")
+        }
         handler(fetched, total, phase)
     }
 
     func onError(message: String) {
-        print("[Sync] Error: \(message)")
+        OrionLogger.sync.error("Error: \(message)")
     }
 }

@@ -19,6 +19,9 @@
 		001000000010 /* ShortcutsHelpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000010 /* ShortcutsHelpView.swift */; };
 		001000000011 /* SearchResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000011 /* SearchResultsView.swift */; };
 		001000000012 /* mail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000012 /* mail.swift */; };
+		001000000013 /* MessageWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000013 /* MessageWebView.swift */; };
+		001000000014 /* OrionLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000014 /* OrionLogger.swift */; };
+		001000000015 /* RustLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002000000015 /* RustLogger.swift */; };
 		001000000020 /* MailFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 002000000020 /* MailFFI.xcframework */; };
 /* End PBXBuildFile section */
 
@@ -35,6 +38,9 @@
 		002000000010 /* ShortcutsHelpView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsHelpView.swift; sourceTree = "<group>"; };
 		002000000011 /* SearchResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResultsView.swift; sourceTree = "<group>"; };
 		002000000012 /* mail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = mail.swift; sourceTree = "<group>"; };
+		002000000013 /* MessageWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageWebView.swift; sourceTree = "<group>"; };
+		002000000014 /* OrionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrionLogger.swift; sourceTree = "<group>"; };
+		002000000015 /* RustLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustLogger.swift; sourceTree = "<group>"; };
 		002000000020 /* MailFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MailFFI.xcframework; sourceTree = "<group>"; };
 		002000000030 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		002000000031 /* Orion.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Orion.entitlements; sourceTree = "<group>"; };
@@ -113,6 +119,7 @@
 		006000000005 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				002000000013 /* MessageWebView.swift */,
 				002000000009 /* SearchBox.swift */,
 				002000000010 /* ShortcutsHelpView.swift */,
 			);
@@ -124,6 +131,8 @@
 			children = (
 				002000000004 /* AuthService.swift */,
 				002000000005 /* MailBridge.swift */,
+				002000000014 /* OrionLogger.swift */,
+				002000000015 /* RustLogger.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -241,6 +250,9 @@
 				001000000010 /* ShortcutsHelpView.swift in Sources */,
 				001000000011 /* SearchResultsView.swift in Sources */,
 				001000000012 /* mail.swift in Sources */,
+				001000000013 /* MessageWebView.swift in Sources */,
+				001000000014 /* OrionLogger.swift in Sources */,
+				001000000015 /* RustLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

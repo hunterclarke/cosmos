@@ -113,8 +113,8 @@ struct ThreadListView: View {
         }
         .background(OrionTheme.background)
         .overlay {
-            // Only show empty state when not loading and no threads
-            if !mailBridge.isLoading && mailBridge.threads.isEmpty && mailBridge.isInitialized {
+            // Only show empty state when not loading, not syncing, and no threads
+            if !mailBridge.isLoading && !mailBridge.isSyncing && mailBridge.threads.isEmpty && mailBridge.isInitialized {
                 emptyState
             }
         }
@@ -139,7 +139,7 @@ struct ThreadListView: View {
                     clientSecret: authService.clientSecret
                 )
             } catch {
-                print("[ThreadListView] Sync failed for \(account.email): \(error)")
+                OrionLogger.ui.error("Sync failed for \(account.email): \(error)")
             }
         }
         await mailBridge.loadThreads(label: label, accountId: accountId)
@@ -161,6 +161,7 @@ struct ThreadListView: View {
                 .foregroundColor(OrionTheme.mutedForeground)
         }
     }
+
 }
 
 // MARK: - Thread List Item
