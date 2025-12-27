@@ -167,10 +167,12 @@ struct SearchResultItem: View {
         VStack(alignment: .leading, spacing: OrionTheme.spacing1) {
             // Top row: sender, date
             HStack {
-                // Unread indicator
-                Circle()
-                    .fill(result.isUnread ? OrionTheme.primary : Color.clear)
-                    .frame(width: OrionTheme.unreadDotSize, height: OrionTheme.unreadDotSize)
+                // Unread indicator - only show when unread
+                if result.isUnread {
+                    Circle()
+                        .fill(OrionTheme.primary)
+                        .frame(width: OrionTheme.unreadDotSize, height: OrionTheme.unreadDotSize)
+                }
 
                 Text(senderDisplay)
                     .font(.system(size: OrionTheme.textSm, weight: result.isUnread ? .semibold : .regular))

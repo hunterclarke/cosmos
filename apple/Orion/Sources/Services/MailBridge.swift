@@ -10,6 +10,23 @@ extension FfiSearchResult: Identifiable {
     public var id: String { threadId }
 }
 
+extension FfiThread {
+    /// Convert FfiThread to FfiThreadSummary for navigation
+    func toSummary() -> FfiThreadSummary {
+        FfiThreadSummary(
+            id: id,
+            accountId: accountId,
+            subject: subject,
+            snippet: snippet,
+            lastMessageAt: lastMessageAt,
+            messageCount: messageCount,
+            senderName: senderName,
+            senderEmail: senderEmail,
+            isUnread: isUnread
+        )
+    }
+}
+
 // MARK: - Mail Bridge
 
 /// Swift wrapper around the Rust MailService
@@ -39,7 +56,8 @@ class MailBridge: ObservableObject {
     // MARK: - Private State
 
     private var service: MailService? = nil
-    private let backgroundQueue = DispatchQueue(label: "com.orion.mail", qos: .userInitiated)
+    // Use concurrent queue so reads (thread detail, search) don't block on sync
+    private let backgroundQueue = DispatchQueue(label: "com.orion.mail", qos: .userInitiated, attributes: .concurrent)
     private var lastSyncAt: Date? = nil
     private let syncCooldown: TimeInterval = 30  // 30 seconds minimum between syncs
 
@@ -138,6 +156,8 @@ class MailBridge: ObservableObject {
     func loadThreads(label: String?, accountId: Int64?) async {
         guard let service = service else { return }
 
+        OrionLogger.mailBridge.info("loadThreads called: label=\(label ?? "nil"), accountId=\(accountId.map(String.init) ?? "nil")")
+
         isLoading = true
         defer { isLoading = false }
 
@@ -162,7 +182,7 @@ class MailBridge: ObservableObject {
             self.threads = result.threads
             self.totalCount = result.total
             self.unreadCount = result.unread
-            OrionLogger.mailBridge.info("Loaded \(result.threads.count) threads (total: \(result.total), unread: \(result.unread))")
+            OrionLogger.mailBridge.info("loadThreads result: \(result.threads.count) threads (total: \(result.total), unread: \(result.unread))")
         } catch {
             self.error = "Failed to load threads: \(error.localizedDescription)"
             OrionLogger.mailBridge.error("Load threads error: \(error)")
@@ -228,6 +248,11 @@ class MailBridge: ObservableObject {
     // Note: Sync requires OAuth tokens which need to come from AuthService
     // For now, this is a placeholder - the GPUI app handles sync
 
+    /// Sync account using concurrent fetch and process (like GPUI)
+    ///
+    /// This runs fetch as fast as possible in the background while concurrently
+    /// processing pending messages into threads. This provides much better UX
+    /// for large mailboxes as emails appear during sync rather than at the end.
     func syncAccount(accountId: Int64, tokenJson: String, clientId: String, clientSecret: String) async throws -> FfiSyncStats {
         guard let service = service else {
             throw MailError.InvalidArgument(message: "MailService not initialized")
@@ -241,60 +266,150 @@ class MailBridge: ObservableObject {
 
         isSyncing = true
         syncProgress = SyncProgress(phase: "Starting sync...", fetched: 0, total: nil)
-        OrionLogger.sync.info("Starting sync for account \(accountId)")
-        defer {
-            isSyncing = false
-            syncProgress = nil
-        }
+        OrionLogger.sync.info("Starting concurrent sync for account \(accountId)")
 
-        // Track last refresh to throttle during sync (use class for reference semantics)
-        let refreshTracker = SyncRefreshTracker()
-        let refreshInterval: UInt32 = 100  // Refresh every 100 messages processed
+        let startTime = Date()
 
-        // Create a callback for progress updates that also refreshes the thread list
-        let callback = SwiftSyncProgressCallback { [weak self] fetched, total, phase in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.syncProgress = SyncProgress(phase: phase, fetched: fetched, total: total)
+        // Use actor to safely track concurrent state
+        let syncState = ConcurrentSyncState()
 
-                // Refresh thread list periodically during "Processing" phase
-                // This shows emails as they are ingested
-                if phase.contains("Processed") || phase.contains("Processing") {
-                    if fetched >= refreshTracker.lastCount + refreshInterval {
-                        refreshTracker.lastCount = fetched
-                        // Load threads in background to show new emails
-                        await self.loadThreads(label: "INBOX", accountId: nil)
+        // Capture service reference before entering detached task
+        let fetchService = service
+
+        do {
+            // Start fetch phase in background task
+            let fetchTask = Task.detached {
+                let callback = SwiftSyncProgressCallback { fetched, _, phase in
+                    Task {
+                        await syncState.updateFetchProgress(fetched: fetched, phase: phase)
                     }
                 }
-            }
-        }
 
-        let stats = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<FfiSyncStats, Error>) in
-            backgroundQueue.async {
                 do {
-                    let result = try service.syncAccount(
+                    let stats = try fetchService.fetchMessages(
                         accountId: accountId,
                         tokenJson: tokenJson,
                         clientId: clientId,
                         clientSecret: clientSecret,
                         callback: callback
                     )
-                    continuation.resume(returning: result)
+                    await syncState.setFetchComplete(stats: stats)
+                    OrionLogger.sync.info("Fetch complete: \(stats.messagesFetched) messages fetched")
                 } catch {
-                    continuation.resume(throwing: error)
+                    await syncState.setFetchError(error)
+                    OrionLogger.sync.error("Fetch error: \(error)")
                 }
             }
+
+            // Process pending messages concurrently
+            var totalProcessed: UInt32 = 0
+            var lastRefresh = Date.distantPast
+            let refreshInterval: TimeInterval = 0.3  // Refresh UI every 300ms during processing
+
+            while true {
+                // Check if fetch encountered an error
+                if let fetchError = await syncState.fetchError {
+                    fetchTask.cancel()
+                    throw fetchError
+                }
+
+                // Process a batch of pending messages
+                let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<FfiProcessBatchResult, Error>) in
+                    backgroundQueue.async {
+                        do {
+                            let batch = try service.processPendingBatch(
+                                accountId: accountId,
+                                batchSize: 100
+                            )
+                            continuation.resume(returning: batch)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+
+                totalProcessed += result.processed
+                // Note: threads created is now tracked in the stats we aggregate at the end
+
+                // Update progress UI
+                let fetchProgress = await syncState.fetchProgress
+                let fetchComplete = await syncState.isFetchComplete
+
+                await MainActor.run {
+                    let phase = if fetchComplete {
+                        "Processing \(totalProcessed) messages... (\(result.remaining) remaining)"
+                    } else {
+                        "Fetching (\(fetchProgress.fetched))... Processing (\(totalProcessed))..."
+                    }
+                    self.syncProgress = SyncProgress(phase: phase, fetched: totalProcessed, total: nil)
+                }
+
+                // Refresh thread list periodically to show new emails
+                let now = Date()
+                if now.timeIntervalSince(lastRefresh) >= refreshInterval {
+                    lastRefresh = now
+                    await self.loadThreads(label: "INBOX", accountId: nil)
+                }
+
+                // Check if we're done
+                if !result.hasMore {
+                    // If fetch is also complete, we're done
+                    let fetchComplete = await syncState.isFetchComplete
+                    if fetchComplete {
+                        break
+                    }
+                    // Otherwise, wait a bit for more messages to be fetched
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
+
+            // Wait for fetch task to complete
+            await fetchTask.value
+
+            // Get final fetch stats
+            let fetchStats = await syncState.fetchStats
+
+            // Update sync timestamp
+            lastSyncAt = Date()
+            let durationMs = UInt64(Date().timeIntervalSince(startTime) * 1000)
+
+            // Create combined stats
+            // Note: Detailed thread stats aren't available from processPendingBatch
+            let stats = FfiSyncStats(
+                messagesFetched: fetchStats?.messagesFetched ?? 0,
+                messagesCreated: totalProcessed,
+                messagesUpdated: 0,
+                messagesSkipped: fetchStats?.messagesSkipped ?? 0,
+                labelsUpdated: 0,
+                threadsCreated: 0,  // Not tracked in concurrent sync
+                threadsUpdated: 0,
+                wasIncremental: false,
+                errors: 0,
+                durationMs: durationMs
+            )
+
+            OrionLogger.sync.info("Concurrent sync complete - fetched: \(stats.messagesFetched), processed: \(totalProcessed), duration: \(durationMs)ms")
+
+            // Clear sync state
+            await MainActor.run {
+                self.isSyncing = false
+                self.syncProgress = nil
+            }
+
+            // Reload data after sync
+            await loadAccounts()
+            await loadLabelUnreadCounts(accountId: nil)
+            await loadThreads(label: "INBOX", accountId: nil)
+
+            return stats
+
+        } catch {
+            await MainActor.run {
+                self.isSyncing = false
+                self.syncProgress = nil
+            }
+            throw error
         }
-
-        // Update sync timestamp
-        lastSyncAt = Date()
-        OrionLogger.sync.info("Completed - threads: \(stats.threadsCreated), messages: \(stats.messagesCreated), duration: \(stats.durationMs)ms")
-
-        // Reload data after sync
-        await loadAccounts()
-        await loadLabelUnreadCounts(accountId: nil)
-
-        return stats
     }
 
     // MARK: - Actions
@@ -497,11 +612,6 @@ struct SyncProgress {
     let total: UInt32?
 }
 
-/// Tracks sync refresh state with reference semantics for closure capture
-private class SyncRefreshTracker: @unchecked Sendable {
-    var lastCount: UInt32 = 0
-}
-
 // MARK: - Sync Progress Callback
 
 final class SwiftSyncProgressCallback: SyncProgressCallback, @unchecked Sendable {
@@ -522,5 +632,34 @@ final class SwiftSyncProgressCallback: SyncProgressCallback, @unchecked Sendable
 
     func onError(message: String) {
         OrionLogger.sync.error("Error: \(message)")
+    }
+}
+
+// MARK: - Concurrent Sync State
+
+/// Actor to safely track concurrent fetch/process state
+actor ConcurrentSyncState {
+    struct FetchProgress {
+        var fetched: UInt32 = 0
+        var phase: String = ""
+    }
+
+    private(set) var fetchProgress = FetchProgress()
+    private(set) var isFetchComplete = false
+    private(set) var fetchStats: FfiFetchStats?
+    private(set) var fetchError: Error?
+
+    func updateFetchProgress(fetched: UInt32, phase: String) {
+        fetchProgress.fetched = fetched
+        fetchProgress.phase = phase
+    }
+
+    func setFetchComplete(stats: FfiFetchStats) {
+        isFetchComplete = true
+        fetchStats = stats
+    }
+
+    func setFetchError(_ error: Error) {
+        fetchError = error
     }
 }

@@ -7,27 +7,44 @@ struct MessageWebView {
     let html: String
 
     /// Wraps raw HTML content with dark theme CSS styling
-    private func wrapHtml(_ content: String) -> String {
-        """
+    /// iOS uses a fixed viewport width to ensure emails render at readable size
+    private func wrapHtml(_ content: String, for platform: Platform) -> String {
+        let fontSize = platform == .iOS ? "16px" : "14px"
+        let padding = platform == .iOS ? "16px" : "0"
+
+        // iOS: Use a fixed viewport width (typical email width) so content renders at readable size
+        // The WKWebView will scale this to fit the screen
+        // macOS: Use device width
+        let viewport = platform == .iOS
+            ? "width=600, initial-scale=1.0, user-scalable=yes"
+            : "width=device-width, initial-scale=1.0"
+
+        return """
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta name="viewport" content="\(viewport)">
             <style>
                 * {
                     box-sizing: border-box;
+                }
+                html, body {
+                    margin: 0;
+                    padding: 0;
+                    width: 100%;
+                    min-height: 100%;
                 }
                 body {
                     background-color: #1e1e1e;
                     color: #e0e0e0;
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                    font-size: 14px;
-                    line-height: 1.5;
-                    margin: 0;
-                    padding: 0;
+                    font-size: \(fontSize);
+                    line-height: 1.6;
+                    padding: \(padding);
                     word-wrap: break-word;
                     overflow-wrap: break-word;
+                    -webkit-text-size-adjust: 100%;
                 }
                 a {
                     color: #58a6ff;
@@ -37,10 +54,10 @@ struct MessageWebView {
                     text-decoration: underline;
                 }
                 blockquote {
-                    border-left: 2px solid #444;
+                    border-left: 3px solid #444;
                     padding-left: 12px;
-                    margin: 8px 0;
-                    color: #888;
+                    margin: 12px 0;
+                    color: #999;
                 }
                 img {
                     max-width: 100%;
@@ -95,15 +112,20 @@ struct MessageWebView {
         """
     }
 
+    enum Platform {
+        case macOS
+        case iOS
+    }
+
     /// Creates a configured WKWebView
     private func createWebView() -> WKWebView {
         let configuration = WKWebViewConfiguration()
 
-        // Disable JavaScript for security
+        // Disable JavaScript for security (not needed for email viewing)
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
-        // Enable data detection for links, dates, addresses
         #if os(iOS)
+        // Enable data detection for links, dates, addresses
         configuration.dataDetectorTypes = [.link, .phoneNumber, .calendarEvent, .address]
         #endif
 
@@ -113,10 +135,13 @@ struct MessageWebView {
         // Make background transparent on macOS
         webView.setValue(false, forKey: "drawsBackground")
         #else
-        // Make background transparent on iOS
+        // Configure iOS WebView
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+
+        // Disable scrolling within the WebView (parent ScrollView handles it)
+        webView.scrollView.isScrollEnabled = false
         #endif
 
         return webView
@@ -124,7 +149,12 @@ struct MessageWebView {
 
     /// Loads HTML content into the web view
     private func loadContent(in webView: WKWebView) {
-        let wrappedHtml = wrapHtml(html)
+        #if os(iOS)
+        let platform = Platform.iOS
+        #else
+        let platform = Platform.macOS
+        #endif
+        let wrappedHtml = wrapHtml(html, for: platform)
         webView.loadHTMLString(wrappedHtml, baseURL: nil)
     }
 }

@@ -303,6 +303,11 @@ uint64_t uniffi_mail_fn_constructor_mailservice_new(RustBuffer db_path, RustBuff
 void uniffi_mail_fn_method_mailservice_archive_thread(uint64_t ptr, RustBuffer thread_id, RustBuffer token_json, RustBuffer client_id, RustBuffer client_secret, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_COUNT_PENDING_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_COUNT_PENDING_MESSAGES
+uint32_t uniffi_mail_fn_method_mailservice_count_pending_messages(uint64_t ptr, int64_t account_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_COUNT_THREADS
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_COUNT_THREADS
 uint32_t uniffi_mail_fn_method_mailservice_count_threads(uint64_t ptr, RustBuffer label, RustBuffer account_id, RustCallStatus *_Nonnull out_status
@@ -316,6 +321,11 @@ uint32_t uniffi_mail_fn_method_mailservice_count_unread(uint64_t ptr, RustBuffer
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_DELETE_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_DELETE_ACCOUNT
 void uniffi_mail_fn_method_mailservice_delete_account(uint64_t ptr, int64_t account_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_FETCH_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_FETCH_MESSAGES
+RustBuffer uniffi_mail_fn_method_mailservice_fetch_messages(uint64_t ptr, int64_t account_id, RustBuffer token_json, RustBuffer client_id, RustBuffer client_secret, uint64_t callback, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_FULL_RESYNC
@@ -351,6 +361,11 @@ RustBuffer uniffi_mail_fn_method_mailservice_list_accounts(uint64_t ptr, RustCal
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_LIST_THREADS
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_LIST_THREADS
 RustBuffer uniffi_mail_fn_method_mailservice_list_threads(uint64_t ptr, RustBuffer label, RustBuffer account_id, uint32_t limit, uint32_t offset, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_PROCESS_PENDING_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_PROCESS_PENDING_BATCH
+RustBuffer uniffi_mail_fn_method_mailservice_process_pending_batch(uint64_t ptr, int64_t account_id, uint32_t batch_size, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_FN_METHOD_MAILSERVICE_REGISTER_ACCOUNT
@@ -731,6 +746,12 @@ uint16_t uniffi_mail_checksum_method_mailservice_archive_thread(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_COUNT_PENDING_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_COUNT_PENDING_MESSAGES
+uint16_t uniffi_mail_checksum_method_mailservice_count_pending_messages(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_COUNT_THREADS
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_COUNT_THREADS
 uint16_t uniffi_mail_checksum_method_mailservice_count_threads(void
@@ -746,6 +767,12 @@ uint16_t uniffi_mail_checksum_method_mailservice_count_unread(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_DELETE_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_DELETE_ACCOUNT
 uint16_t uniffi_mail_checksum_method_mailservice_delete_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_FETCH_MESSAGES
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_FETCH_MESSAGES
+uint16_t uniffi_mail_checksum_method_mailservice_fetch_messages(void
     
 );
 #endif
@@ -788,6 +815,12 @@ uint16_t uniffi_mail_checksum_method_mailservice_list_accounts(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_LIST_THREADS
 #define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_LIST_THREADS
 uint16_t uniffi_mail_checksum_method_mailservice_list_threads(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_PROCESS_PENDING_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_MAIL_CHECKSUM_METHOD_MAILSERVICE_PROCESS_PENDING_BATCH
+uint16_t uniffi_mail_checksum_method_mailservice_process_pending_batch(void
     
 );
 #endif

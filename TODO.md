@@ -40,6 +40,6 @@
 - [x] Wire up Add Account and Sync buttons in SidebarView
 - [x] Wire up thread actions (archive, star, read/unread)
 - [x] Cross-platform OAuth credentials (xcconfig for SwiftUI, symlink for GPUI)
-- [ ] Test on iOS device/simulator
-- [ ] Port sync
-- [ ] Port webview
+- [x] Test on iOS device/simulator
+- [x] Port sync
+- [x] Port webview

@@ -443,8 +443,15 @@ struct MessageCard: View {
     private var messageBody: some View {
         if let html = message.bodyHtml, !html.isEmpty {
             // Render HTML content with WKWebView
+            // iOS: Allow content to determine height (no maxHeight)
+            // macOS: Use constrained height
+            #if os(iOS)
+            MessageWebView(html: html)
+                .frame(minHeight: 200)
+            #else
             MessageWebView(html: html)
                 .frame(minHeight: 100, maxHeight: 600)
+            #endif
         } else if let text = message.bodyText, !text.isEmpty {
             Text(text)
                 .font(.system(size: OrionTheme.textSm))

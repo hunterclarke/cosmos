@@ -344,6 +344,110 @@ impl MailService {
     }
 
     // ========================================================================
+    // Concurrent Sync (like GPUI)
+    // ========================================================================
+
+    /// Fetch messages from Gmail (Phase 1 of sync)
+    ///
+    /// This fetches messages as fast as possible and stores them in pending_messages.
+    /// Call process_pending_batch concurrently to process them into threads.
+    ///
+    /// This is designed to be called on a background thread while process_pending_batch
+    /// runs on another thread.
+    pub fn fetch_messages(
+        &self,
+        account_id: i64,
+        token_json: String,
+        client_id: String,
+        client_secret: String,
+        callback: Box<dyn SyncProgressCallback>,
+    ) -> Result<FfiFetchStats, MailError> {
+        let auth = GmailAuth::with_token_data(client_id, client_secret, Some(token_json));
+        let gmail = GmailClient::new(auth);
+
+        let options = SyncOptions {
+            search_index: Some(self.search_index.clone()),
+            ..Default::default()
+        };
+
+        let mut stats = crate::sync::SyncStats::default();
+
+        callback.on_progress(0, None, "Fetching messages...".to_string());
+
+        // fetch_phase_with_progress callback is (fetched_count, phase_description)
+        let result = crate::sync::fetch_phase_with_progress(
+            &gmail,
+            self.store.as_ref(),
+            account_id,
+            &options,
+            &mut stats,
+            &|fetched, phase| {
+                callback.on_progress(fetched as u32, None, phase.to_string());
+            }
+        ).map_err(|e| {
+            log::error!("fetch_messages error: {}", e);
+            callback.on_error(e.to_string());
+            MailError::Sync {
+                message: e.to_string(),
+            }
+        })?;
+
+        callback.on_progress(result.fetched as u32, None, "Fetch complete".to_string());
+
+        Ok(FfiFetchStats {
+            messages_fetched: result.fetched as u32,
+            messages_pending: result.pending as u32,
+            messages_skipped: result.skipped as u32,
+        })
+    }
+
+    /// Process a batch of pending messages into threads
+    ///
+    /// Call this in a loop while fetch_messages runs in the background.
+    /// Returns the number of messages processed and whether there are more to process.
+    pub fn process_pending_batch(
+        &self,
+        account_id: i64,
+        batch_size: u32,
+    ) -> Result<FfiProcessBatchResult, MailError> {
+        let options = SyncOptions {
+            search_index: Some(self.search_index.clone()),
+            ..Default::default()
+        };
+
+        let mut stats = crate::sync::SyncStats::default();
+
+        let result = crate::sync::process_pending_batch(
+            self.store.as_ref(),
+            account_id,
+            &options,
+            &mut stats,
+            batch_size as usize,
+        ).map_err(|e| {
+            log::error!("process_pending_batch error: {}", e);
+            MailError::Sync {
+                message: e.to_string(),
+            }
+        })?;
+
+        Ok(FfiProcessBatchResult {
+            processed: result.processed as u32,
+            remaining: result.remaining as u32,
+            errors: result.errors as u32,
+            has_more: result.has_more,
+        })
+    }
+
+    /// Get the count of pending messages for an account
+    pub fn count_pending_messages(&self, account_id: i64) -> Result<u32, MailError> {
+        let count = self.store.count_pending_messages(account_id, None)
+            .map_err(|e| MailError::Database {
+                message: e.to_string(),
+            })?;
+        Ok(count as u32)
+    }
+
+    // ========================================================================
     // Actions
     // ========================================================================
 

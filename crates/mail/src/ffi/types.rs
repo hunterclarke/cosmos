@@ -393,6 +393,30 @@ impl From<SearchResult> for FfiSearchResult {
 // Callback Traits
 // ============================================================================
 
+/// FFI-friendly fetch phase statistics (for concurrent sync)
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiFetchStats {
+    /// Messages successfully fetched and stored as pending
+    pub messages_fetched: u32,
+    /// Messages currently pending processing
+    pub messages_pending: u32,
+    /// Messages skipped (already synced)
+    pub messages_skipped: u32,
+}
+
+/// FFI-friendly process batch result (for concurrent sync)
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiProcessBatchResult {
+    /// Number of messages processed in this batch
+    pub processed: u32,
+    /// Number of messages remaining to process
+    pub remaining: u32,
+    /// Number of errors in this batch
+    pub errors: u32,
+    /// Whether there are more messages to process
+    pub has_more: bool,
+}
+
 /// Callback interface for sync progress updates
 #[uniffi::export(callback_interface)]
 pub trait SyncProgressCallback: Send + Sync {

@@ -209,9 +209,12 @@ struct ThreadListItem: View {
             HStack {
                 // Unread indicator + Sender
                 HStack(spacing: 8) {
-                    Circle()
-                        .fill(thread.isUnread ? OrionTheme.primary : Color.clear)
-                        .frame(width: 8, height: 8)
+                    // Only show dot when unread
+                    if thread.isUnread {
+                        Circle()
+                            .fill(OrionTheme.primary)
+                            .frame(width: 8, height: 8)
+                    }
 
                     Text(senderDisplay)
                         .font(.system(size: 15, weight: thread.isUnread ? .semibold : .regular))
@@ -261,10 +264,12 @@ struct ThreadListItem: View {
 
     private var wideLayout: some View {
         HStack(spacing: OrionTheme.spacing2) {
-            // Unread indicator
-            Circle()
-                .fill(thread.isUnread ? OrionTheme.primary : Color.clear)
-                .frame(width: OrionTheme.unreadDotSize, height: OrionTheme.unreadDotSize)
+            // Unread indicator - only show when unread
+            if thread.isUnread {
+                Circle()
+                    .fill(OrionTheme.primary)
+                    .frame(width: OrionTheme.unreadDotSize, height: OrionTheme.unreadDotSize)
+            }
 
             // Sender
             Text(senderDisplay)

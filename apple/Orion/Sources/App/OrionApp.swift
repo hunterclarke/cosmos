@@ -11,11 +11,8 @@ struct OrionApp: App {
 
     init() {
         // Initialize Rust logging before any Rust code runs
-        #if DEBUG
-        initializeRustLogging(debug: true)
-        #else
+        // Only pass info level and above to Swift (not debug/trace) to reduce noise
         initializeRustLogging(debug: false)
-        #endif
 
         OrionLogger.app.info("Orion app initializing")
     }

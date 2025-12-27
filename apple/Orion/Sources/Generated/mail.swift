@@ -584,6 +584,11 @@ public protocol MailServiceProtocol: AnyObject, Sendable {
     func archiveThread(threadId: String, tokenJson: String, clientId: String, clientSecret: String) throws 
     
     /**
+     * Get the count of pending messages for an account
+     */
+    func countPendingMessages(accountId: Int64) throws  -> UInt32
+    
+    /**
      * Count threads (optionally filtered by label and/or account)
      */
     func countThreads(label: String?, accountId: Int64?) throws  -> UInt32
@@ -597,6 +602,17 @@ public protocol MailServiceProtocol: AnyObject, Sendable {
      * Delete an account and all its data
      */
     func deleteAccount(accountId: Int64) throws 
+    
+    /**
+     * Fetch messages from Gmail (Phase 1 of sync)
+     *
+     * This fetches messages as fast as possible and stores them in pending_messages.
+     * Call process_pending_batch concurrently to process them into threads.
+     *
+     * This is designed to be called on a background thread while process_pending_batch
+     * runs on another thread.
+     */
+    func fetchMessages(accountId: Int64, tokenJson: String, clientId: String, clientSecret: String, callback: SyncProgressCallback) throws  -> FfiFetchStats
     
     /**
      * Perform a full resync, clearing existing data
@@ -634,6 +650,14 @@ public protocol MailServiceProtocol: AnyObject, Sendable {
      * Returns threads sorted by last_message_at descending (newest first).
      */
     func listThreads(label: String?, accountId: Int64?, limit: UInt32, offset: UInt32) throws  -> [FfiThreadSummary]
+    
+    /**
+     * Process a batch of pending messages into threads
+     *
+     * Call this in a loop while fetch_messages runs in the background.
+     * Returns the number of messages processed and whether there are more to process.
+     */
+    func processPendingBatch(accountId: Int64, batchSize: UInt32) throws  -> FfiProcessBatchResult
     
     /**
      * Register a new account with the given email
@@ -777,6 +801,18 @@ open func archiveThread(threadId: String, tokenJson: String, clientId: String, c
 }
     
     /**
+     * Get the count of pending messages for an account
+     */
+open func countPendingMessages(accountId: Int64)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMailError_lift) {
+    uniffi_mail_fn_method_mailservice_count_pending_messages(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(accountId),$0
+    )
+})
+}
+    
+    /**
      * Count threads (optionally filtered by label and/or account)
      */
 open func countThreads(label: String?, accountId: Int64?)throws  -> UInt32  {
@@ -811,6 +847,28 @@ open func deleteAccount(accountId: Int64)throws   {try rustCallWithError(FfiConv
         FfiConverterInt64.lower(accountId),$0
     )
 }
+}
+    
+    /**
+     * Fetch messages from Gmail (Phase 1 of sync)
+     *
+     * This fetches messages as fast as possible and stores them in pending_messages.
+     * Call process_pending_batch concurrently to process them into threads.
+     *
+     * This is designed to be called on a background thread while process_pending_batch
+     * runs on another thread.
+     */
+open func fetchMessages(accountId: Int64, tokenJson: String, clientId: String, clientSecret: String, callback: SyncProgressCallback)throws  -> FfiFetchStats  {
+    return try  FfiConverterTypeFfiFetchStats_lift(try rustCallWithError(FfiConverterTypeMailError_lift) {
+    uniffi_mail_fn_method_mailservice_fetch_messages(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(accountId),
+        FfiConverterString.lower(tokenJson),
+        FfiConverterString.lower(clientId),
+        FfiConverterString.lower(clientSecret),
+        FfiConverterCallbackInterfaceSyncProgressCallback_lower(callback),$0
+    )
+})
 }
     
     /**
@@ -901,6 +959,22 @@ open func listThreads(label: String?, accountId: Int64?, limit: UInt32, offset: 
         FfiConverterOptionInt64.lower(accountId),
         FfiConverterUInt32.lower(limit),
         FfiConverterUInt32.lower(offset),$0
+    )
+})
+}
+    
+    /**
+     * Process a batch of pending messages into threads
+     *
+     * Call this in a loop while fetch_messages runs in the background.
+     * Returns the number of messages processed and whether there are more to process.
+     */
+open func processPendingBatch(accountId: Int64, batchSize: UInt32)throws  -> FfiProcessBatchResult  {
+    return try  FfiConverterTypeFfiProcessBatchResult_lift(try rustCallWithError(FfiConverterTypeMailError_lift) {
+    uniffi_mail_fn_method_mailservice_process_pending_batch(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(accountId),
+        FfiConverterUInt32.lower(batchSize),$0
     )
 })
 }
@@ -1203,6 +1277,83 @@ public func FfiConverterTypeFfiEmailAddress_lower(_ value: FfiEmailAddress) -> R
 
 
 /**
+ * FFI-friendly fetch phase statistics (for concurrent sync)
+ */
+public struct FfiFetchStats: Equatable, Hashable {
+    /**
+     * Messages successfully fetched and stored as pending
+     */
+    public var messagesFetched: UInt32
+    /**
+     * Messages currently pending processing
+     */
+    public var messagesPending: UInt32
+    /**
+     * Messages skipped (already synced)
+     */
+    public var messagesSkipped: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Messages successfully fetched and stored as pending
+         */messagesFetched: UInt32, 
+        /**
+         * Messages currently pending processing
+         */messagesPending: UInt32, 
+        /**
+         * Messages skipped (already synced)
+         */messagesSkipped: UInt32) {
+        self.messagesFetched = messagesFetched
+        self.messagesPending = messagesPending
+        self.messagesSkipped = messagesSkipped
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension FfiFetchStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFetchStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFetchStats {
+        return
+            try FfiFetchStats(
+                messagesFetched: FfiConverterUInt32.read(from: &buf), 
+                messagesPending: FfiConverterUInt32.read(from: &buf), 
+                messagesSkipped: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiFetchStats, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.messagesFetched, into: &buf)
+        FfiConverterUInt32.write(value.messagesPending, into: &buf)
+        FfiConverterUInt32.write(value.messagesSkipped, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFetchStats_lift(_ buf: RustBuffer) throws -> FfiFetchStats {
+    return try FfiConverterTypeFfiFetchStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFetchStats_lower(_ value: FfiFetchStats) -> RustBuffer {
+    return FfiConverterTypeFfiFetchStats.lower(value)
+}
+
+
+/**
  * FFI-friendly field highlight
  */
 public struct FfiFieldHighlight: Equatable, Hashable {
@@ -1485,6 +1636,93 @@ public func FfiConverterTypeFfiMessage_lift(_ buf: RustBuffer) throws -> FfiMess
 #endif
 public func FfiConverterTypeFfiMessage_lower(_ value: FfiMessage) -> RustBuffer {
     return FfiConverterTypeFfiMessage.lower(value)
+}
+
+
+/**
+ * FFI-friendly process batch result (for concurrent sync)
+ */
+public struct FfiProcessBatchResult: Equatable, Hashable {
+    /**
+     * Number of messages processed in this batch
+     */
+    public var processed: UInt32
+    /**
+     * Number of messages remaining to process
+     */
+    public var remaining: UInt32
+    /**
+     * Number of errors in this batch
+     */
+    public var errors: UInt32
+    /**
+     * Whether there are more messages to process
+     */
+    public var hasMore: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Number of messages processed in this batch
+         */processed: UInt32, 
+        /**
+         * Number of messages remaining to process
+         */remaining: UInt32, 
+        /**
+         * Number of errors in this batch
+         */errors: UInt32, 
+        /**
+         * Whether there are more messages to process
+         */hasMore: Bool) {
+        self.processed = processed
+        self.remaining = remaining
+        self.errors = errors
+        self.hasMore = hasMore
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension FfiProcessBatchResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiProcessBatchResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiProcessBatchResult {
+        return
+            try FfiProcessBatchResult(
+                processed: FfiConverterUInt32.read(from: &buf), 
+                remaining: FfiConverterUInt32.read(from: &buf), 
+                errors: FfiConverterUInt32.read(from: &buf), 
+                hasMore: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiProcessBatchResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.processed, into: &buf)
+        FfiConverterUInt32.write(value.remaining, into: &buf)
+        FfiConverterUInt32.write(value.errors, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiProcessBatchResult_lift(_ buf: RustBuffer) throws -> FfiProcessBatchResult {
+    return try FfiConverterTypeFfiProcessBatchResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiProcessBatchResult_lower(_ value: FfiProcessBatchResult) -> RustBuffer {
+    return FfiConverterTypeFfiProcessBatchResult.lower(value)
 }
 
 
@@ -2966,6 +3204,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mail_checksum_method_mailservice_archive_thread() != 11148) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mail_checksum_method_mailservice_count_pending_messages() != 18354) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mail_checksum_method_mailservice_count_threads() != 4161) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2973,6 +3214,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_method_mailservice_delete_account() != 61908) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mail_checksum_method_mailservice_fetch_messages() != 59243) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_method_mailservice_full_resync() != 55078) {
@@ -2994,6 +3238,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_method_mailservice_list_threads() != 31968) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mail_checksum_method_mailservice_process_pending_batch() != 3778) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mail_checksum_method_mailservice_register_account() != 22319) {

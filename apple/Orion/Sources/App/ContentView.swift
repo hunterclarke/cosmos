@@ -19,8 +19,8 @@ struct ContentView: View {
     @State private var showingError: Bool = false
     @State private var errorMessage: String = ""
 
-    // iPhone tab selection
-    @State private var selectedTab: Tab = .inbox
+    // iPhone navigation path
+    @State private var iPhoneNavigationPath = NavigationPath()
 
     // Keyboard navigation state
     @State private var selectedThreadIndex: Int = 0
@@ -41,11 +41,6 @@ struct ContentView: View {
         ("TRASH", "Trash", "trash")
     ]
 
-    enum Tab: Hashable {
-        case inbox
-        case search
-        case accounts
-    }
 
     var body: some View {
         Group {
@@ -66,6 +61,9 @@ struct ContentView: View {
             }
             Task {
                 await mailBridge.initialize()
+
+                // Resume any incomplete syncs from previous sessions
+                await resumeIncompleteSyncs()
             }
             // Start background sync polling
             startPolling()
@@ -80,11 +78,6 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
             isSearching = true
-            #if os(iOS)
-            if horizontalSizeClass == .compact {
-                selectedTab = .search
-            }
-            #endif
         }
         // Reset selected index when threads change
         .onChange(of: mailBridge.threads) { _, _ in
@@ -101,11 +94,206 @@ struct ContentView: View {
 
     #if os(iOS)
     private var iPhoneLayout: some View {
-        TabView(selection: $selectedTab) {
-            // Inbox Tab
-            NavigationStack {
+        NavigationStack(path: $iPhoneNavigationPath) {
+            // Root: Labels screen with account picker
+            iPhoneLabelsScreen
+                .navigationDestination(for: String.self) { labelId in
+                    // Thread list for selected label
+                    iPhoneThreadListScreen(labelId: labelId)
+                }
+        }
+        .onAppear {
+            // Auto-navigate to Inbox on launch
+            if iPhoneNavigationPath.isEmpty {
+                iPhoneNavigationPath.append(selectedLabel ?? "INBOX")
+            }
+        }
+    }
+
+    /// Labels screen - root of iPhone navigation
+    /// Shows account picker at top, then list of labels
+    private var iPhoneLabelsScreen: some View {
+        List {
+            // Account Picker Section
+            Section {
+                Menu {
+                    // All Accounts option
+                    Button {
+                        selectedAccountId = nil
+                    } label: {
+                        if selectedAccountId == nil {
+                            Label("All Accounts", systemImage: "checkmark")
+                        } else {
+                            Text("All Accounts")
+                        }
+                    }
+
+                    Divider()
+
+                    // Individual accounts
+                    ForEach(mailBridge.accounts) { account in
+                        Button {
+                            selectedAccountId = account.id
+                        } label: {
+                            if selectedAccountId == account.id {
+                                Label(account.displayName ?? account.email, systemImage: "checkmark")
+                            } else {
+                                Text(account.displayName ?? account.email)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    // Add account
+                    Button {
+                        addAccount()
+                    } label: {
+                        Label("Add Account", systemImage: "plus")
+                    }
+                    .disabled(!authService.isConfigured || !mailBridge.isInitialized)
+                } label: {
+                    HStack {
+                        // Account avatar
+                        if let accountId = selectedAccountId,
+                           let account = mailBridge.accounts.first(where: { $0.id == accountId }) {
+                            Circle()
+                                .fill(Color(hex: account.avatarColor))
+                                .frame(width: 36, height: 36)
+                                .overlay(
+                                    Text(String(account.email.prefix(1)).uppercased())
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundColor(.white)
+                                )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(account.displayName ?? account.email)
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundColor(OrionTheme.foreground)
+                                Text(account.email)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(OrionTheme.mutedForeground)
+                            }
+                        } else {
+                            Circle()
+                                .fill(OrionTheme.primary)
+                                .frame(width: 36, height: 36)
+                                .overlay(
+                                    Image(systemName: "tray.2")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(.white)
+                                )
+                            Text("All Accounts")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundColor(OrionTheme.foreground)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 12))
+                            .foregroundColor(OrionTheme.mutedForeground)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            // Labels Section
+            Section("Mailboxes") {
+                ForEach(Self.labels, id: \.id) { label in
+                    Button {
+                        selectedLabel = label.id
+                        iPhoneNavigationPath.append(label.id)
+                    } label: {
+                        HStack {
+                            Image(systemName: label.icon)
+                                .font(.system(size: 18))
+                                .foregroundColor(OrionTheme.primary)
+                                .frame(width: 28)
+
+                            Text(label.name)
+                                .font(.system(size: 17))
+                                .foregroundColor(OrionTheme.foreground)
+
+                            Spacer()
+
+                            // Unread count
+                            if let count = mailBridge.labelUnreadCounts[label.id], count > 0 {
+                                Text("\(count)")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(OrionTheme.mutedForeground)
+                            }
+
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(OrionTheme.mutedForeground.opacity(0.5))
+                        }
+                    }
+                }
+            }
+
+            // Actions Section
+            Section {
+                if mailBridge.isSyncing {
+                    // Show non-interactive sync status
+                    HStack {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Syncing...")
+                            .foregroundColor(OrionTheme.mutedForeground)
+                    }
+                } else {
+                    Button {
+                        syncAllAccounts()
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.clockwise")
+                                .foregroundColor(OrionTheme.primary)
+                            Text("Sync All Accounts")
+                                .foregroundColor(OrionTheme.foreground)
+                        }
+                    }
+                    .disabled(!authService.isConfigured || mailBridge.accounts.isEmpty || !mailBridge.isInitialized)
+                }
+            }
+
+            // Settings Section
+            Section {
+                NavigationLink {
+                    SettingsView()
+                } label: {
+                    HStack {
+                        Image(systemName: "gear")
+                            .foregroundColor(OrionTheme.mutedForeground)
+                            .frame(width: 28)
+                        Text("Settings")
+                            .foregroundColor(OrionTheme.foreground)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Mailboxes")
+        .onAppear {
+            OrionLogger.ui.info("Mailboxes: \(mailBridge.accounts.count) accounts, selectedAccountId=\(selectedAccountId.map(String.init) ?? "nil")")
+            for account in mailBridge.accounts {
+                OrionLogger.ui.info("  Account \(account.id): \(account.email)")
+            }
+        }
+    }
+
+    /// Thread list screen for iPhone - pushed from labels
+    private func iPhoneThreadListScreen(labelId: String) -> some View {
+        ZStack {
+            if isSearching {
+                SearchResultsView(
+                    query: searchQuery,
+                    onSelectThread: { result in
+                        navigateToSearchResult(result)
+                    }
+                )
+            } else {
                 ThreadListView(
-                    label: selectedLabel,
+                    label: labelId,
                     accountId: selectedAccountId,
                     selectedIndex: $selectedThreadIndex,
                     onSelectThread: { thread in
@@ -115,183 +303,39 @@ struct ContentView: View {
                     onStar: starThread,
                     onToggleRead: toggleReadThread
                 )
-                .navigationTitle(currentLabelTitle)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .principal) {
-                        HStack(spacing: 8) {
-                            labelPicker
-                            if mailBridge.isSyncing {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                            }
-                        }
-                    }
-                }
-                .navigationDestination(item: $selectedThread) { thread in
-                    ThreadDetailView(
-                        thread: thread,
-                        onBack: { selectedThread = nil },
-                        onArchive: { archiveThread(thread) },
-                        onStar: { starThread(thread) },
-                        onToggleRead: { toggleReadThread(thread) }
-                    )
+                .id("\(labelId)-\(selectedAccountId.map(String.init) ?? "all")")
+                .onAppear {
+                    OrionLogger.ui.info("ThreadListView: label=\(labelId), accountId=\(selectedAccountId.map(String.init) ?? "nil"), threads=\(mailBridge.threads.count)")
                 }
             }
-            .tabItem {
-                Label("Inbox", systemImage: "tray")
-            }
-            .tag(Tab.inbox)
-
-            // Search Tab
-            NavigationStack {
-                SearchResultsView(
-                    query: searchQuery,
-                    onSelectThread: { _ in
-                        // TODO: Navigate to thread
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchQuery, isPresented: $isSearching, prompt: "Search emails")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 8) {
+                    Text(isSearching ? "Search" : labelName(for: labelId))
+                        .font(.headline)
+                    if mailBridge.isSyncing {
+                        ProgressView()
+                            .scaleEffect(0.7)
                     }
-                )
-                .navigationTitle("Search")
-                .searchable(text: $searchQuery, prompt: "Search emails")
+                }
             }
-            .tabItem {
-                Label("Search", systemImage: "magnifyingglass")
-            }
-            .tag(Tab.search)
-
-            // Accounts Tab
-            NavigationStack {
-                iPhoneAccountsView
-                    .navigationTitle("Accounts")
-            }
-            .tabItem {
-                Label("Accounts", systemImage: "person.2")
-            }
-            .tag(Tab.accounts)
+        }
+        .navigationDestination(item: $selectedThread) { thread in
+            ThreadDetailView(
+                thread: thread,
+                onBack: { selectedThread = nil },
+                onArchive: { archiveThread(thread) },
+                onStar: { starThread(thread) },
+                onToggleRead: { toggleReadThread(thread) }
+            )
         }
     }
 
-    private var labelPicker: some View {
-        Menu {
-            ForEach(Self.labels, id: \.id) { label in
-                Button {
-                    selectedLabel = label.id
-                } label: {
-                    if selectedLabel == label.id {
-                        Label(label.name, systemImage: "checkmark")
-                    } else {
-                        Text(label.name)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(currentLabelTitle)
-                    .font(.headline)
-                Image(systemName: "chevron.down")
-                    .font(.caption)
-            }
-            .foregroundColor(OrionTheme.foreground)
-        }
-    }
-
-    private var iPhoneAccountsView: some View {
-        List {
-            Section("Accounts") {
-                // All Accounts option
-                Button {
-                    selectedAccountId = nil
-                    selectedTab = .inbox
-                } label: {
-                    HStack {
-                        Circle()
-                            .fill(OrionTheme.primary)
-                            .frame(width: 32, height: 32)
-                            .overlay(
-                                Image(systemName: "tray.2")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.white)
-                            )
-                        Text("All Accounts")
-                            .foregroundColor(OrionTheme.foreground)
-                        Spacer()
-                        if selectedAccountId == nil {
-                            Image(systemName: "checkmark")
-                                .foregroundColor(OrionTheme.primary)
-                        }
-                    }
-                }
-
-                // Individual accounts
-                ForEach(mailBridge.accounts) { account in
-                    Button {
-                        selectedAccountId = account.id
-                        selectedTab = .inbox
-                    } label: {
-                        HStack {
-                            Circle()
-                                .fill(Color(hex: account.avatarColor))
-                                .frame(width: 32, height: 32)
-                                .overlay(
-                                    Text(String(account.email.prefix(1)).uppercased())
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(.white)
-                                )
-                            VStack(alignment: .leading) {
-                                Text(account.displayName ?? account.email)
-                                    .foregroundColor(OrionTheme.foreground)
-                                Text(account.email)
-                                    .font(.caption)
-                                    .foregroundColor(OrionTheme.mutedForeground)
-                            }
-                            Spacer()
-                            if selectedAccountId == account.id {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(OrionTheme.primary)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Section {
-                Button {
-                    addAccount()
-                } label: {
-                    HStack {
-                        Image(systemName: "plus.circle")
-                        Text("Add Account")
-                    }
-                }
-                .disabled(!authService.isConfigured || !mailBridge.isInitialized)
-
-                Button {
-                    syncAllAccounts()
-                } label: {
-                    HStack {
-                        Image(systemName: "arrow.clockwise")
-                        Text(mailBridge.isSyncing ? "Syncing..." : "Sync All")
-                    }
-                }
-                .disabled(mailBridge.isSyncing || !authService.isConfigured || mailBridge.accounts.isEmpty || !mailBridge.isInitialized)
-            }
-
-            // Settings section
-            Section {
-                NavigationLink {
-                    SettingsView()
-                } label: {
-                    Label("Settings", systemImage: "gear")
-                }
-
-                NavigationLink {
-                    KeyboardShortcutsListView()
-                } label: {
-                    Label("Keyboard Shortcuts", systemImage: "keyboard")
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
+    private func labelName(for labelId: String) -> String {
+        Self.labels.first(where: { $0.id == labelId })?.name ?? labelId
     }
     #endif
 
@@ -354,9 +398,8 @@ struct ContentView: View {
                     if isSearching && !searchQuery.isEmpty {
                         SearchResultsView(
                             query: searchQuery,
-                            onSelectThread: { thread in
-                                // Convert search result to thread summary for display
-                                selectedThread = nil // Will need conversion
+                            onSelectThread: { result in
+                                navigateToSearchResult(result)
                             }
                         )
                     }
@@ -528,6 +571,19 @@ struct ContentView: View {
         }
     }
 
+    /// Navigate to a thread from search results
+    /// Preserves search state so user can go back to results
+    private func navigateToSearchResult(_ result: FfiSearchResult) {
+        Task {
+            // Load the full thread detail to get account_id and other info
+            if let detail = await mailBridge.loadThreadDetail(threadId: result.threadId) {
+                // Convert to summary for navigation
+                // Don't clear search state - preserve it for back navigation
+                selectedThread = detail.thread.toSummary()
+            }
+        }
+    }
+
     // MARK: - Thread Actions
 
     private func archiveSelected() {
@@ -650,6 +706,44 @@ struct ContentView: View {
         await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
     }
 
+    /// Resume any incomplete syncs from previous sessions
+    private func resumeIncompleteSyncs() async {
+        guard authService.isConfigured else { return }
+
+        let incompleteSyncs = await mailBridge.checkForIncompleteSyncs()
+
+        if !incompleteSyncs.isEmpty {
+            OrionLogger.sync.info("Found \(incompleteSyncs.count) incomplete sync(s) to resume")
+        }
+
+        for (account, syncState) in incompleteSyncs {
+            OrionLogger.sync.info("Resuming sync for \(account.email) - last sync at \(syncState.lastSyncAt)")
+
+            // Get tokens for this account
+            do {
+                let tokens = try await authService.getValidTokens(for: account.id)
+
+                // Start sync in background (don't block)
+                Task.detached { [mailBridge, authService] in
+                    do {
+                        let _ = try await mailBridge.syncAccount(
+                            accountId: account.id,
+                            tokenJson: tokens.toTokenJson(),
+                            clientId: authService.clientId,
+                            clientSecret: authService.clientSecret
+                        )
+                    } catch {
+                        await MainActor.run {
+                            OrionLogger.sync.error("Resume sync failed for \(account.email): \(error)")
+                        }
+                    }
+                }
+            } catch {
+                OrionLogger.sync.error("Failed to get tokens for \(account.email): \(error)")
+            }
+        }
+    }
+
     // MARK: - Thread Actions (for swipe gestures)
 
     private func archiveThread(_ thread: FfiThreadSummary) {
@@ -718,24 +812,26 @@ struct ContentView: View {
                     try authService.saveTokens(tokens, for: account.id)
                     OrionLogger.ui.info("Added account: \(email)")
 
-                    // Switch to inbox tab to show sync progress (iOS)
-                    #if os(iOS)
-                    if horizontalSizeClass == .compact {
-                        selectedTab = .inbox
-                    }
-                    #endif
-
-                    // Trigger initial sync
-                    let tokenJson = tokens.toTokenJson()
-                    OrionLogger.auth.debug("Token JSON: \(tokenJson)")
-                    OrionLogger.auth.debug("Token expires at: \(tokens.expiresAt), now: \(Date())")
-                    let _ = try await mailBridge.syncAccount(
-                        accountId: account.id,
-                        tokenJson: tokenJson,
-                        clientId: authService.clientId,
-                        clientSecret: authService.clientSecret
-                    )
+                    // Load threads immediately (will be empty but ready)
                     await mailBridge.loadThreads(label: selectedLabel, accountId: selectedAccountId)
+
+                    // Start sync in background - don't await it
+                    // Progress callback will refresh threads as emails arrive
+                    let tokenJson = tokens.toTokenJson()
+                    Task.detached { [mailBridge, authService] in
+                        do {
+                            let _ = try await mailBridge.syncAccount(
+                                accountId: account.id,
+                                tokenJson: tokenJson,
+                                clientId: authService.clientId,
+                                clientSecret: authService.clientSecret
+                            )
+                        } catch {
+                            await MainActor.run {
+                                OrionLogger.sync.error("Initial sync failed for \(email): \(error)")
+                            }
+                        }
+                    }
                 } else {
                     errorMessage = "Failed to register account"
                     showingError = true

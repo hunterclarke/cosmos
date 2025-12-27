@@ -549,7 +549,7 @@ pub fn fetch_phase(
 ///
 /// Call this from a background thread, then call `process_pending_batch` repeatedly
 /// to process messages with UI updates between batches.
-fn fetch_phase_with_progress<F>(
+pub fn fetch_phase_with_progress<F>(
     gmail: &GmailClient,
     store: &dyn MailStore,
     account_id: i64,
