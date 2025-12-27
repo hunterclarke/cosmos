@@ -32,6 +32,7 @@ impl AccountItem {
     }
 
     /// Set the unread count for this account
+    #[allow(dead_code)]
     pub fn unread(mut self, count: u32) -> Self {
         self.unread_count = count;
         self
@@ -164,6 +165,7 @@ impl AllAccountsItem {
     }
 
     /// Set the total unread count across all accounts
+    #[allow(dead_code)]
     pub fn unread(mut self, count: u32) -> Self {
         self.total_unread = count;
         self

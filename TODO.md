@@ -9,7 +9,7 @@
 - [ ] Add toast notifications for actions
 - [x] Add keyboard shortcuts help overlay
 - [ ] Add command palette (`Cmd+K`)
-- [ ] Multi-account support
+- [x] Multi-account support
 - [ ] Attachments + blob storage
 - [ ] Compose email
 - [ ] Reply to email
@@ -30,3 +30,4 @@
 - [ ] Improve plain text email rendering (horizontal padding)
 - [ ] List view paging
 - [ ] Only half my main mailbox was synced
+- [ ] Sync is causing too many renders. Debounce.
