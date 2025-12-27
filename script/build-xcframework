@@ -43,10 +43,9 @@ IOS_SIM_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 rm -rf "$XCFRAMEWORK_DIR" "$HEADERS_DIR"
 mkdir -p "$SWIFT_DIR" "$HEADERS_DIR"
 
-# Deployment targets - match the SDK versions for now
-# TODO: Choose appropriate minimum versions later
-MACOS_DEPLOYMENT_TARGET="26.0"
-IOS_DEPLOYMENT_TARGET="26.0"
+# Deployment targets - match Package.swift minimums
+MACOS_DEPLOYMENT_TARGET="14.0"
+IOS_DEPLOYMENT_TARGET="17.0"
 
 echo ""
 echo "=== Building for macOS (arm64)..."

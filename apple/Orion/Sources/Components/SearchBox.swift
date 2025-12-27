@@ -5,9 +5,10 @@ import Combine
 struct SearchBox: View {
     @Binding var query: String
     @Binding var isSearching: Bool
+    @Binding var isEditing: Bool
 
     @State private var localQuery: String = ""
-    @State private var isFocused: Bool = false
+    @State private var isActive: Bool = false
     @FocusState private var textFieldFocused: Bool
 
     // Debounce timer
@@ -19,17 +20,33 @@ struct SearchBox: View {
                 .font(.system(size: 12))
                 .foregroundColor(OrionTheme.mutedForeground)
 
-            TextField("Search emails...", text: $localQuery)
-                .textFieldStyle(.plain)
-                .font(.system(size: OrionTheme.textSm))
-                .foregroundColor(OrionTheme.foreground)
-                .focused($textFieldFocused)
-                .onSubmit {
-                    commitSearch()
-                }
-                .onChange(of: localQuery) { _, newValue in
-                    debounceSearch(newValue)
-                }
+            if isActive {
+                // Active: show real TextField
+                TextField("Search emails...", text: $localQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: OrionTheme.textSm))
+                    .foregroundColor(OrionTheme.foreground)
+                    .focused($textFieldFocused)
+                    .onSubmit {
+                        commitSearch()
+                    }
+                    .onChange(of: localQuery) { _, newValue in
+                        debounceSearch(newValue)
+                    }
+                    .onKeyPress(.escape) {
+                        handleEscapeKey()
+                        return .handled
+                    }
+                    .onAppear {
+                        textFieldFocused = true
+                    }
+            } else {
+                // Inactive: show placeholder text (not a TextField)
+                Text("Search emails...")
+                    .font(.system(size: OrionTheme.textSm))
+                    .foregroundColor(OrionTheme.mutedForeground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             // Clear button
             if !localQuery.isEmpty {
@@ -44,7 +61,7 @@ struct SearchBox: View {
             }
 
             // Keyboard shortcut hint
-            if !isFocused && localQuery.isEmpty {
+            if !isActive && localQuery.isEmpty {
                 Text("/")
                     .font(.system(size: OrionTheme.textXs, weight: .medium))
                     .foregroundColor(OrionTheme.mutedForeground)
@@ -54,6 +71,10 @@ struct SearchBox: View {
                     .cornerRadius(4)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            activateSearch()
+        }
         .padding(.horizontal, OrionTheme.spacing3)
         .padding(.vertical, OrionTheme.spacing2)
         .frame(width: OrionTheme.searchBoxWidth)
@@ -61,17 +82,17 @@ struct SearchBox: View {
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(isFocused ? OrionTheme.primary : OrionTheme.border, lineWidth: 1)
+                .stroke(isActive ? OrionTheme.primary : OrionTheme.border, lineWidth: 1)
         )
-        .onChange(of: textFieldFocused) { _, focused in
-            isFocused = focused
-            if focused {
-                isSearching = true
-            }
-        }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
-            textFieldFocused = true
+            activateSearch()
         }
+    }
+
+    private func activateSearch() {
+        isActive = true
+        isEditing = true
+        isSearching = true
     }
 
     private func debounceSearch(_ value: String) {
@@ -85,7 +106,6 @@ struct SearchBox: View {
             await MainActor.run {
                 if !value.isEmpty {
                     query = value
-                    isSearching = true
                 }
             }
         }
@@ -94,14 +114,36 @@ struct SearchBox: View {
     private func commitSearch() {
         debounceTask?.cancel()
         query = localQuery
-        isSearching = !localQuery.isEmpty
+        // Unfocus so user can navigate results with keyboard
+        if !localQuery.isEmpty {
+            isActive = false
+            isEditing = false
+            textFieldFocused = false
+            // isSearching stays true so results are shown
+        }
     }
 
     private func clearSearch() {
         localQuery = ""
         query = ""
         isSearching = false
+        isEditing = false
+        isActive = false
         textFieldFocused = false
+    }
+
+    private func handleEscapeKey() {
+        if !localQuery.isEmpty {
+            // First escape: clear the search text
+            localQuery = ""
+            query = ""
+        } else {
+            // Second escape: deactivate and exit search mode
+            isActive = false
+            isEditing = false
+            isSearching = false
+            textFieldFocused = false
+        }
     }
 }
 
@@ -113,8 +155,8 @@ extension Notification.Name {
 
 #Preview {
     VStack {
-        SearchBox(query: .constant(""), isSearching: .constant(false))
-        SearchBox(query: .constant("test query"), isSearching: .constant(true))
+        SearchBox(query: .constant(""), isSearching: .constant(false), isEditing: .constant(false))
+        SearchBox(query: .constant("test query"), isSearching: .constant(true), isEditing: .constant(true))
     }
     .padding()
     .background(OrionTheme.background)

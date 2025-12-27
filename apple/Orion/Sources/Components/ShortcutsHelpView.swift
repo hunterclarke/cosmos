@@ -1,41 +1,68 @@
 import SwiftUI
 
 /// Modal overlay showing keyboard shortcuts
+/// Adapts to iOS with a sheet presentation and responsive layout
 struct ShortcutsHelpView: View {
     @Binding var isPresented: Bool
+    @Environment(\.horizontalSizeClass) var horizontalSizeClass
 
     private let shortcuts: [(section: String, items: [(key: String, description: String)])] = [
         ("Navigation", [
-            ("j / ↓", "Move to next thread"),
-            ("k / ↑", "Move to previous thread"),
-            ("Enter / o", "Open selected thread"),
-            ("Escape / u", "Go back to list"),
-            ("g then i", "Go to Inbox"),
-            ("g then s", "Go to Starred"),
-            ("g then d", "Go to Drafts"),
-            ("g then t", "Go to Sent"),
+            ("j / ↓", "Move down / Next"),
+            ("k / ↑", "Move up / Previous"),
+            ("Enter", "Open selected"),
+            ("Escape", "Go back / Close"),
         ]),
         ("Actions", [
             ("e", "Archive"),
-            ("s", "Star/Unstar"),
-            ("Shift+I", "Mark as read"),
-            ("Shift+U", "Mark as unread"),
-            ("#", "Delete"),
-            ("r", "Reply"),
-            ("a", "Reply all"),
-            ("f", "Forward"),
+            ("s", "Toggle star"),
+            ("u", "Toggle read/unread"),
+            ("#", "Move to trash"),
+        ]),
+        ("Go To", [
+            ("g then i", "Go to Inbox"),
+            ("g then s", "Go to Starred"),
+            ("g then t", "Go to Sent"),
+            ("g then d", "Go to Drafts"),
+            ("g then a", "Go to All Mail"),
+            ("g then #", "Go to Trash"),
         ]),
         ("Search", [
-            ("/", "Focus search box"),
+            ("/ or ⌘K", "Focus search"),
             ("Escape", "Clear search"),
         ]),
-        ("Other", [
+        ("Help", [
             ("?", "Show this help"),
-            ("Cmd+,", "Open settings"),
         ])
     ]
 
     var body: some View {
+        #if os(iOS)
+        // On iOS, use a sheet presentation
+        Color.clear
+            .sheet(isPresented: $isPresented) {
+                NavigationStack {
+                    shortcutsContent
+                        .navigationTitle("Keyboard Shortcuts")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") {
+                                    isPresented = false
+                                }
+                            }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        #else
+        // On macOS, use the modal overlay
+        macOSModalView
+        #endif
+    }
+
+    #if os(macOS)
+    private var macOSModalView: some View {
         ZStack {
             // Backdrop
             OrionTheme.modalBackdrop
@@ -69,18 +96,7 @@ struct ShortcutsHelpView: View {
                 Divider()
                     .background(OrionTheme.border)
 
-                // Shortcuts grid
-                ScrollView {
-                    LazyVGrid(columns: [
-                        GridItem(.flexible()),
-                        GridItem(.flexible())
-                    ], spacing: OrionTheme.spacing4) {
-                        ForEach(shortcuts, id: \.section) { section in
-                            ShortcutSection(title: section.section, items: section.items)
-                        }
-                    }
-                    .padding(OrionTheme.spacing4)
-                }
+                shortcutsContent
             }
             .frame(width: 600, height: 500)
             .background(OrionTheme.background)
@@ -91,6 +107,31 @@ struct ShortcutsHelpView: View {
             )
             .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 10)
         }
+    }
+    #endif
+
+    private var shortcutsContent: some View {
+        ScrollView {
+            LazyVGrid(columns: gridColumns, spacing: OrionTheme.spacing4) {
+                ForEach(shortcuts, id: \.section) { section in
+                    ShortcutSection(title: section.section, items: section.items)
+                }
+            }
+            .padding(OrionTheme.spacing4)
+        }
+        .background(OrionTheme.background)
+    }
+
+    private var gridColumns: [GridItem] {
+        #if os(iOS)
+        if horizontalSizeClass == .compact {
+            return [GridItem(.flexible())]
+        } else {
+            return [GridItem(.flexible()), GridItem(.flexible())]
+        }
+        #else
+        return [GridItem(.flexible()), GridItem(.flexible())]
+        #endif
     }
 }
 

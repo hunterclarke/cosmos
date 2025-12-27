@@ -1,12 +1,19 @@
 import SwiftUI
 
 /// Detail view showing a thread with all its messages
+/// Adapts to iOS with a floating action bar at the bottom
 struct ThreadDetailView: View {
     @EnvironmentObject var mailBridge: MailBridge
     @EnvironmentObject var authService: AuthService
+    @Environment(\.horizontalSizeClass) var horizontalSizeClass
 
     let thread: FfiThreadSummary
     let onBack: () -> Void
+
+    // Optional action callbacks for iOS NavigationStack integration
+    var onArchive: (() -> Void)?
+    var onStar: (() -> Void)?
+    var onToggleRead: (() -> Void)?
 
     @State private var threadDetail: FfiThreadDetail? = nil
     @State private var isLoading: Bool = true
@@ -17,11 +24,13 @@ struct ThreadDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header with actions
+            #if os(macOS)
+            // Header with actions (macOS only - iOS uses navigation bar)
             headerView
 
             Divider()
                 .background(OrionTheme.border)
+            #endif
 
             // Messages
             if isLoading {
@@ -45,9 +54,29 @@ struct ThreadDetailView: View {
             }
         }
         .background(OrionTheme.background)
+        #if os(iOS)
+        .navigationTitle(thread.subject)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                // Compact toolbar for iPad regular size class
+                if horizontalSizeClass == .regular {
+                    actionButtons
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            // Floating action bar for iPhone
+            if horizontalSizeClass == .compact {
+                iOSActionBar
+            }
+        }
+        #endif
         .task {
             await loadThreadDetail()
             // isStarred would need to be fetched from thread detail or labels
+            // For now, default to false since FfiThreadSummary doesn't include star status
+            isStarred = false
             isRead = !thread.isUnread
         }
         .alert("Error", isPresented: $showingError) {
@@ -56,6 +85,90 @@ struct ThreadDetailView: View {
             Text(errorMessage)
         }
     }
+
+    // MARK: - iOS Action Bar
+
+    #if os(iOS)
+    private var iOSActionBar: some View {
+        HStack(spacing: 0) {
+            // Archive
+            Button {
+                if let onArchive = onArchive {
+                    onArchive()
+                } else {
+                    Task { await archiveThread() }
+                }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 20))
+                    Text("Archive")
+                        .font(.system(size: 10))
+                }
+                .frame(maxWidth: .infinity)
+                .foregroundColor(OrionTheme.foreground)
+            }
+
+            // Star
+            Button {
+                if let onStar = onStar {
+                    onStar()
+                } else {
+                    Task { await toggleStar() }
+                }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: isStarred ? "star.fill" : "star")
+                        .font(.system(size: 20))
+                        .foregroundColor(isStarred ? .yellow : OrionTheme.foreground)
+                    Text(isStarred ? "Unstar" : "Star")
+                        .font(.system(size: 10))
+                }
+                .frame(maxWidth: .infinity)
+                .foregroundColor(OrionTheme.foreground)
+            }
+
+            // Read/Unread
+            Button {
+                if let onToggleRead = onToggleRead {
+                    onToggleRead()
+                } else {
+                    Task { await toggleRead() }
+                }
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: isRead ? "envelope.badge" : "envelope.open")
+                        .font(.system(size: 20))
+                    Text(isRead ? "Unread" : "Read")
+                        .font(.system(size: 10))
+                }
+                .frame(maxWidth: .infinity)
+                .foregroundColor(OrionTheme.foreground)
+            }
+
+            // Trash
+            Button {
+                // TODO: Implement delete
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 20))
+                    Text("Trash")
+                        .font(.system(size: 10))
+                }
+                .frame(maxWidth: .infinity)
+                .foregroundColor(OrionTheme.foreground)
+            }
+        }
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .overlay(
+            Divider()
+                .background(OrionTheme.border),
+            alignment: .top
+        )
+    }
+    #endif
 
     // MARK: - Header
 

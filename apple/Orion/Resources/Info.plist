@@ -18,12 +18,7 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
+    <!-- OAuth URL Scheme (works on both macOS and iOS) -->
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -35,9 +30,39 @@
             </array>
         </dict>
     </array>
+    <!-- Google OAuth Credentials (injected at build time) -->
     <key>GoogleClientID</key>
     <string>$(GOOGLE_CLIENT_ID)</string>
     <key>GoogleClientSecret</key>
     <string>$(GOOGLE_CLIENT_SECRET)</string>
+    <!-- iOS: Request network access -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+    </dict>
+    <!-- macOS: High-resolution display support -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- iOS: Support multiple windows on iPad -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+    </dict>
+    <!-- iOS: Supported interface orientations -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
 </dict>
 </plist>
